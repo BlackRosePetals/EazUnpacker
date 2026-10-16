@@ -1,0 +1,191 @@
+using AsmResolver.DotNet;
+using AsmResolver.DotNet.Code.Cil;
+using AsmResolver.DotNet.Serialized;
+using AsmResolver.PE.DotNet.Cil;
+using EazyDevirt.Core.Abstractions.Interfaces;
+using EazyDevirt.Core.Architecture;
+
+namespace EazyDevirt.PatternMatching.Patterns.OpCodes;
+
+#region Leave
+
+internal record LeaveProtectedPattern : IPattern
+{
+    public override IList<CilOpCode> Pattern => new List<CilOpCode>
+    {
+        CilOpCodes.Ldarg_0,     // 29	0057	ldarg.0
+        CilOpCodes.Ldloca_S,    // 30	0058	ldloca.s	V_0 (0)
+        CilOpCodes.Call,        // 31	005A	call	instance uint32 VM/Struct13::method_0()
+        CilOpCodes.Call,        // 32	005F	call	instance void VM::SetBranchIndex(uint32)
+        CilOpCodes.Ret          // 33	0064	ret
+    };
+
+    public override bool MatchEntireBody => false;
+
+    public override bool Verify(CilInstructionCollection instructions, int index = 0) =>
+        PatternMatcher.MatchesPattern(new SetBranchIndexPattern(),
+            instructions[index + 3].Operand as SerializedMethodDefinition);
+}
+
+internal record Leave : IOpCodePattern
+{
+    public override IList<CilOpCode> Pattern => new List<CilOpCode>
+    {
+        CilOpCodes.Ldarg_1,     // 0	0000	ldarg.1
+        CilOpCodes.Castclass,   // 1	0001	castclass	VMUIntOperand
+        CilOpCodes.Callvirt,    // 2	0006	callvirt	instance uint32 VMUIntOperand::method_3()
+        CilOpCodes.Stloc_0,     // 3	000B	stloc.0
+        CilOpCodes.Ldarg_0,     // 4	000C	ldarg.0
+        CilOpCodes.Ldnull,      // 5	000D	ldnull
+        CilOpCodes.Ldloc_0,     // 6	000E	ldloc.0
+        CilOpCodes.Callvirt,    // 7	000F	callvirt	instance void VM::method_34(object, uint32)
+        CilOpCodes.Ret          // 8	0014	ret
+    };
+
+    public override CilOpCode? CilOpCode => CilOpCodes.Leave;
+    
+    public override bool Verify(VMOpCode vmOpCode, int index = 0)
+    {
+        var method = vmOpCode.SerializedDelegateMethod.CilMethodBody!.Instructions[7].Operand as SerializedMethodDefinition;
+        return (method?.CilMethodBody?.Instructions.Where(x => x.OpCode.Code is CilCode.Call or CilCode.Callvirt)
+            .Any(x => PatternMatcher.MatchesPattern(new LeaveProtectedPattern(),
+                x.Operand as SerializedMethodDefinition))).GetValueOrDefault();
+    }
+}
+#endregion Leave
+
+#region Endfinally
+
+internal record Endfinally : IOpCodePattern
+{
+    public override IList<CilOpCode> Pattern => new List<CilOpCode>
+    {
+        CilOpCodes.Ldarg_0,     // 0	0000	ldarg.0
+        CilOpCodes.Callvirt,    // 1	0001	callvirt	instance void VM::LeaveProtected()
+        CilOpCodes.Ret          // 2	0006	ret
+    };
+    
+    public override CilOpCode? CilOpCode => CilOpCodes.Endfinally;
+
+    public override bool Verify(VMOpCode vmOpCode, int index = 0) => PatternMatcher.MatchesPattern(new LeaveProtectedPattern(),
+        vmOpCode.SerializedDelegateMethod.CilMethodBody!.Instructions[1].Operand as SerializedMethodDefinition);
+}
+#endregion Endfinally
+
+#region Endfilter
+
+internal record EndfilterInnerPattern : IPattern
+{
+    public override IList<CilOpCode> Pattern => new List<CilOpCode>
+    {
+        CilOpCodes.Ldarg_0,     // 7	0018	ldarg.0
+        CilOpCodes.Ldfld,       // 8	0019	ldfld	uint32 VM::instructionsBytesIndex
+        CilOpCodes.Ldarg_0,     // 9	001E	ldarg.0
+        CilOpCodes.Ldfld,       // 10	001F	ldfld	object VM::CurrentException
+        CilOpCodes.Newobj,      // 11	0024	newobj	instance void VM/Struct13::.ctor(uint32, object)
+        CilOpCodes.Callvirt,    // 12	0029	callvirt	instance void class [System]System.Collections.Generic.Stack`1<valuetype VM/Struct13>::Push(!0)
+        CilOpCodes.Ldarg_0,     // 13	002E	ldarg.0
+        CilOpCodes.Ldc_I4_0,    // 14	002F	ldc.i4.0
+        CilOpCodes.Stfld,       // 15	0030	stfld	bool VM::hasException
+        CilOpCodes.Ldarg_0,     // 16	0035	ldarg.0
+        CilOpCodes.Call,        // 17	0036	call	instance void VM::LeaveProtected()
+    };
+
+    public override bool MatchEntireBody => false;
+
+    public override bool Verify(CilInstructionCollection instructions, int index = 0) =>
+        instructions[index + 10].Operand is SerializedMethodDefinition leaveProtected &&
+        PatternMatcher.MatchesPattern(new LeaveProtectedPattern(), leaveProtected);
+}
+
+internal record Endfilter : IOpCodePattern
+{
+    public override IList<CilOpCode> Pattern => new List<CilOpCode>
+    {
+        CilOpCodes.Ldarg_0,     // 0	0000	ldarg.0
+        CilOpCodes.Ldarg_1,     // 1	0001	ldarg.1
+        CilOpCodes.Callvirt,    // 2	0002	callvirt	instance void VM::EndfilterInner(class VMOperandType)
+        CilOpCodes.Ret          // 3	0007	ret
+    };
+    
+    public override CilOpCode? CilOpCode => CilOpCodes.Endfilter;
+
+    public override bool Verify(CilInstructionCollection instructions, int index = 0) =>
+        PatternMatcher.MatchesPattern(new EndfilterInnerPattern(),
+            instructions[2].Operand as SerializedMethodDefinition);
+}
+#endregion Endfilter
+
+#region Throw
+
+internal record ThrowExceptionPattern : IPattern
+{
+    public override IList<CilOpCode> Pattern => new List<CilOpCode>
+    {
+        CilOpCodes.Ldarg_1,     // 0	0000	ldarg.1
+        CilOpCodes.Isinst,      // 1	0001	isinst	[mscorlib]System.Exception
+        CilOpCodes.Stloc_0,     // 2	0006	stloc.0
+        CilOpCodes.Ldloc_0,     // 3	0007	ldloc.0
+        CilOpCodes.Brfalse_S,   // 4	0008	brfalse.s	7 (0010) ldarg.1 
+        CilOpCodes.Ldloc_0,     // 5	000A	ldloc.0
+        CilOpCodes.Call,        // 6	000B	call	void VM::smethod_42(class [mscorlib]System.Exception)
+        CilOpCodes.Ldarg_1,     // 7	0010	ldarg.1
+        CilOpCodes.Call,        // 8	0011	call	void VM::smethod_200(object)
+        CilOpCodes.Ret          // 9	0016	ret
+    };
+
+    public override bool Verify(CilInstructionCollection instructions, int index = 0) =>
+        instructions[1].Operand is ITypeDescriptor
+        {
+            FullName: "System.Exception"
+        };
+}
+
+internal record Throw : IOpCodePattern
+{
+    public override IList<CilOpCode> Pattern => new List<CilOpCode>
+    { 
+        CilOpCodes.Ldarg_0,     // 0	0000	ldarg.0
+        CilOpCodes.Callvirt,    // 1	0001	callvirt	instance class VMOperandType VM::PopStack()
+        CilOpCodes.Stloc_0,     // 2	0006	stloc.0
+        CilOpCodes.Ldarg_0,     // 3	0007	ldarg.0
+        CilOpCodes.Ldloc_0,     // 4	0008	ldloc.0
+        CilOpCodes.Callvirt,    // 5	0009	callvirt	instance object VMOperandType::GetOperandValue()
+        CilOpCodes.Callvirt,    // 6	000E	callvirt	instance void VM::ThrowException(object)
+        CilOpCodes.Ret          // 7	0013	ret
+    };
+
+    public override CilOpCode? CilOpCode => CilOpCodes.Throw;
+
+    public override bool Verify(VMOpCode vmOpCode, int index = 0) =>
+        PatternMatcher.MatchesPattern(new ThrowExceptionPattern(),
+            vmOpCode.SerializedDelegateMethod.CilMethodBody?.Instructions[6].Operand as SerializedMethodDefinition);
+}
+
+#endregion Throw
+
+#region Rethrow
+
+internal record Rethrow : IOpCodePattern
+{
+    public override IList<CilOpCode> Pattern => new List<CilOpCode>
+    { 
+        CilOpCodes.Ldarg_0,     // 0	0000	ldarg.0
+        CilOpCodes.Ldfld,       // 1	0001	ldfld	object VM::CurrentException
+        CilOpCodes.Brtrue_S,    // 2	0006	brtrue.s	5 (000E) ldarg.0 
+        CilOpCodes.Newobj,      // 3	0008	newobj	instance void [mscorlib]System.InvalidOperationException::.ctor()
+        CilOpCodes.Throw,       // 4	000D	throw
+        CilOpCodes.Ldarg_0,     // 5	000E	ldarg.0
+        CilOpCodes.Ldarg_0,     // 6	000F	ldarg.0
+        CilOpCodes.Ldfld,       // 7	0010	ldfld	object VM::CurrentException
+        CilOpCodes.Callvirt,    // 8	0015	callvirt	instance void VM::ThrowException(object)
+        CilOpCodes.Ret          // 9	001A	ret
+    };
+
+    public override CilOpCode? CilOpCode => CilOpCodes.Rethrow;
+
+    public override bool Verify(VMOpCode vmOpCode, int index = 0) =>
+        PatternMatcher.MatchesPattern(new ThrowExceptionPattern(),
+            vmOpCode.SerializedDelegateMethod.CilMethodBody?.Instructions[8].Operand as SerializedMethodDefinition);
+}
+#endregion Rethrow

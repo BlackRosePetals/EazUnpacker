@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net48</TargetFramework><LangVersion>latest</LangVersion><Nullable>disable</Nullable><AssemblyName>Unpacker.Fixer</AssemblyName></PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="Program.cs;Options.cs" />
+    <PackageReference Include="dnlib" Version="4.5.0" />
+    <PackageReference Include="Lib.Harmony" Version="2.4.2" />
+  </ItemGroup>
+</Project>

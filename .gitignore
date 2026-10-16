@@ -1,0 +1,28 @@
+# Build outputs
+[Bb]in/
+[Oo]bj/
+artifacts/
+test-results/
+packages/
+TestResults/
+*.trx
+# IDE settings
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.cache
+# Local inputs and outputs
+samples/
+样本/
+.env
+.env.*
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini

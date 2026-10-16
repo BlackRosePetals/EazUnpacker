@@ -1,0 +1,19 @@
+# 第三方源码
+
+| 组件 | 来源及基线提交 | 许可证 | 本项目用途 |
+|---|---|---|---|
+| EazFixer | https://github.com/holly-hacker/EazFixer ，8f985af6ae03d806ce46b69459528d36b7ce2eb8 | MIT，src/ThirdParty/EazFixer/LICENSE | 字符串、资源、内嵌程序集恢复；新桥接接口和控制流处理 |
+| EazyDevirt | https://github.com/puff/EazyDevirt ，c4fd922c7c4e4fa4b5125f37af430b50588ddd3e | GPL-3.0，src/ThirdParty/EazyDevirt/LICENSE | VM 静态恢复，适配 net48 和版本差异 |
+| Echo | EazyDevirt 的固定 submodule 提交 9c0030316b764ff741e238c8016e61429fc58e4e | LGPL-3.0，src/ThirdParty/Echo/LICENSE.md | CIL 解释执行和控制流基础设施；保留所需四个源项目 |
+
+EazyDevirt 的本地修改包括：将默认接口实现换成 net48 可用的抽象 record；RSA 资源流读/seek 修复；签名式运行时/资源定位；操作数和 token 枚举发现；方法头布局及静态标志校准、调用静态/泛型标志推导；宽松处理等价 call/分支形式；失败方法体回滚；未知指令与无效操作数拒绝提交；输出校验及桥接接口。
+
+EazDecode（https://github.com/HoLLy-HaCKeR/EazDecode，fc5802c2824778c3c53a74704b4715d8219e83bc）作为参考，未纳入本项目。
+
+NuGet 引用：dnlib 4.5.0、Lib.Harmony 2.4.2、AsmResolver.DotNet 6.0.0-beta.4、BouncyCastle.Cryptography 2.5.1、Newtonsoft.Json 13.0.3。Echo 中的引用沿用固定上游项目。相应包的许可证见 NuGet 包自身的元数据和许可文件。
+
+
+
+完整 C# 工程导出使用 ICSharpCode.Decompiler（ILSpy）11.1.0.9782，MIT 许可，来源 https://github.com/icsharpcode/ILSpy 。另引用 System.Memory 4.6.3；必要的导出工程引用 System.Runtime.CompilerServices.Unsafe 6.0.0。名称恢复模块生成合法、稳定的可读名称，不依赖 EazDecode 原始名称密码。
+
+新增 VM 适配包括嵌套泛型/数组/引用参数形状、泛型字段的实例类型上下文、外部类型作用域、比较指令变体、加密区段结束标记和字符串密钥。样本密钥记录必须重新通过原始校验，未删除业务校验器。

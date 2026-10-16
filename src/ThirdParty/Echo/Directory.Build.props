@@ -1,0 +1,5 @@
+<Project><PropertyGroup>
+  <TargetFramework>netstandard2.0</TargetFramework><LangVersion>12</LangVersion><Nullable>enable</Nullable>
+  <Version>1.0.0-alpha.1</Version><GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+  <NoWarn>$(NoWarn);CS1591</NoWarn>
+</PropertyGroup></Project>

@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net48</TargetFramework><LangVersion>latest</LangVersion><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><AssemblyName>Unpacker.Devirt</AssemblyName></PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="Program.cs;Devirtualization\Options\DevirtualizationOptionsBinder.cs" />
+    <PackageReference Include="AsmResolver.DotNet" Version="6.0.0-beta.4" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.5.1" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <ProjectReference Include="..\Echo\src\Platforms\Echo.Platforms.AsmResolver\Echo.Platforms.AsmResolver.csproj" />
+  </ItemGroup>
+</Project>

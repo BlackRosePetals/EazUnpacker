@@ -1,0 +1,27 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <Title>Echo.DataFlow</Title>
+        <Description>Data flow models and algorithms for the Echo program analysis toolsuite.</Description>
+        <PackageTags>program code analysis data-flow-graph slicing dependency-analysis</PackageTags>
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+      <DocumentationFile>bin\Debug\Echo.DataFlow.xml</DocumentationFile>
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+      <DocumentationFile>bin\Release\Echo.DataFlow.xml</DocumentationFile>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <ProjectReference Include="..\Echo.ControlFlow\Echo.ControlFlow.csproj" />
+      <ProjectReference Include="..\Echo\Echo.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <PackageReference Include="System.Collections.Immutable" Version="1.7.1" />
+      <PackageReference Include="Nullable" Version="1.3.1" />
+    </ItemGroup>
+
+</Project>

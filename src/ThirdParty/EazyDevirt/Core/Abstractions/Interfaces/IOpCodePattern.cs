@@ -1,0 +1,28 @@
+using AsmResolver.PE.DotNet.Cil;
+using EazyDevirt.Core.Architecture;
+
+namespace EazyDevirt.Core.Abstractions.Interfaces;
+
+internal abstract record IOpCodePattern : IPattern
+{
+    public virtual CilOpCode? CilOpCode => null;
+    public virtual SpecialOpCodes? SpecialOpCode => null;
+
+    /// <summary>
+    /// Whether the pattern can translate to CIL opcodes or is a special vm action.
+    /// </summary>
+    public virtual bool IsSpecial => false;
+
+    /// <summary>
+    /// Whether the pattern can be matched more than once.
+    /// </summary>
+    public virtual bool AllowMultiple => false;
+    
+    /// <summary>
+    /// Additional verification to ensure the match is valid.
+    /// </summary>
+    /// <param name="vmOpCode">VMOpCode the pattern is for</param>
+    /// <param name="index">Index of the pattern</param>
+    /// <returns>Whether verification is successful</returns>
+    public virtual bool Verify(VMOpCode vmOpCode, int index = 0) => Verify(vmOpCode.SerializedDelegateMethod, index);
+}
