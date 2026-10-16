@@ -34,7 +34,7 @@ internal static class Program
             var result=File.Exists(Path.Combine(run,"result.json")) ? JsonConvert.DeserializeObject<SampleResult>(File.ReadAllText(Path.Combine(run,"result.json")))!
                 : new SampleResult{Input=input,Status="failed",Stages=new(){new StageResult{Name="Worker",Status="failed",Detail="Worker exit "+code}}};
             result.DiagnosticsDirectory=run;
-            if(code!=0 || string.IsNullOrEmpty(result.Output) || !File.Exists(result.Output))
+            if(string.IsNullOrEmpty(result.Output) || !File.Exists(result.Output))
             {
                 File.WriteAllText(Path.Combine(root,"latest.json"),JsonConvert.SerializeObject(result,Formatting.Indented));
                 string failures=string.Join(", ",result.Stages.Where(s=>s.Status is "failed" or "skipped").Select(s=>s.Name));
@@ -42,26 +42,19 @@ internal static class Program
                 Console.Error.WriteLine("恢复未完成："+result.Status+"；诊断保存在 Unpacker 工作缓存。");
                 return code==124 || result.Status=="failed" ? 1 : 2;
             }
-            // Publish the recovered IL before optional source export/build. A source
-            // compiler failure must not discard an otherwise recovered assembly.
+            bool recoveryComplete=code==0 && result.Status=="complete";
+            if(!recoveryComplete)
+            {
+                result.Stages.Add(new StageResult{Name="RecoveryPipeline",Status="partial",
+                    Detail="Backend exit "+code+"; recovery status "+result.Status+". Publishing the available recovered assembly."});
+                progress.Report(5,"warning","恢复阶段尚未全部完成（退出码 "+code+"）；仍将输出已生成的 unpacked 程序");
+            }
+            // Publish available recovered IL even when a later recovery stage fails.
+            // Configuration and optional source work must not withhold the file.
             string recovered=result.Output;
+            result.After??=AssemblyInspector.Inspect(recovered);
             progress.Report(5,"info","发布恢复文件（源码重建将单独检查）");
-            if(!result.After!.ModernRuntime && Path.GetExtension(output).Equals(".exe",StringComparison.OrdinalIgnoreCase))
-            {
-                string configuration=Path.Combine(run,"published-runtime.config");
-                if(File.Exists(output+".config"))File.Copy(output+".config",Path.Combine(run,"previous-output.config"));
-                RuntimeCompatibility.WriteConfiguration(input+".config",output+".config",configuration);
-                Publish(configuration,output+".config");
-                result.RuntimeConfig=output+".config";
-                result.Stages.Add(new StageResult{Name="RuntimeSignatureCompatibility",Status="success",Changes=1,
-                    Detail="Preserved assembly public key/token; enabled per-EXE CLR full-trust bypass in "+result.RuntimeConfig+". No machine-wide changes. External enforced host policy and native self-checks are not re-signing."});
-                progress.Report(5,"info","保留原始程序集身份；运行配置已输出："+result.RuntimeConfig);
-            }
-            else if(!result.After.ModernRuntime)
-            {
-                progress.Report(5,"warning","DLL 的强名称验证由宿主控制；没有原始私钥时无法重新签出原签名。请在受信任宿主的 EXE.config 配置兼容策略。");
-            }
-            if(result.After!.ModernRuntime && Path.GetExtension(output).Equals(".exe",StringComparison.OrdinalIgnoreCase))
+            if(result.After.ModernRuntime && Path.GetExtension(output).Equals(".exe",StringComparison.OrdinalIgnoreCase))
             {
                 string packed=Path.Combine(run,"unpacked.exe");
                 BundleExtractor.Repack(input,recovered,Path.Combine(run,"bundle"),packed);
@@ -72,6 +65,30 @@ internal static class Program
             result.Stages.Add(new StageResult{Name="Publish",Status="success",Detail=output});
             File.WriteAllText(Path.Combine(root,"latest.json"),JsonConvert.SerializeObject(result,Formatting.Indented));
             progress.Report(5,"success","已输出 unpacked 程序："+output);
+            if(!result.After!.ModernRuntime && Path.GetExtension(output).Equals(".exe",StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                string configuration=Path.Combine(run,"published-runtime.config");
+                if(File.Exists(output+".config"))File.Copy(output+".config",Path.Combine(run,"previous-output.config"));
+                RuntimeCompatibility.WriteConfiguration(input+".config",output+".config",configuration);
+                Publish(configuration,output+".config");
+                result.RuntimeConfig=output+".config";
+                result.Stages.Add(new StageResult{Name="RuntimeSignatureCompatibility",Status="success",Changes=1,
+                    Detail="Preserved assembly public key/token; enabled per-EXE CLR full-trust bypass in "+result.RuntimeConfig+". No machine-wide changes. External enforced host policy and native self-checks are not re-signing."});
+                progress.Report(5,"info","保留原始程序集身份；运行配置已输出："+result.RuntimeConfig);
+                }
+                catch(Exception ex)
+                {
+                    result.Stages.Add(new StageResult{Name="RuntimeSignatureCompatibility",Status="failed",Detail=ex.ToString()});
+                    progress.Report(5,"warning","运行配置生成失败；unpacked 程序已保留："+output+"；"+ex.Message);
+                }
+            }
+            else if(!result.After.ModernRuntime)
+            {
+                progress.Report(5,"warning","DLL 的强名称验证由宿主控制；没有原始私钥时无法重新签出原签名。请在受信任宿主的 EXE.config 配置兼容策略。");
+            }
+            File.WriteAllText(Path.Combine(root,"latest.json"),JsonConvert.SerializeObject(result,Formatting.Indented));
             string stringIndex=Path.Combine(run,"string-index");
             progress.Report(6,"start","建立带模块/方法/资源来源的字符串搜索索引（不替换运行依赖）");
             int indexCode=ProcessRunner.Run(worker,new[]{"string-index",recovered,input,stringIndex},Path.Combine(run,"string-index.log"),240,progress.Report);
@@ -122,14 +139,15 @@ internal static class Program
                     Console.Error.WriteLine("C# 重编译产物未通过 CLR 检查；恢复文件已输出："+output);return 2;
                 }
             }
-            result.Output=output;result.Status="complete";
+            bool complete=recoveryComplete && !result.Stages.Any(s=>s.Status is "failed" or "skipped" or "partial");
+            result.Output=output;result.Status=complete?"complete":"partial";
             File.WriteAllText(Path.Combine(root,"latest.json"),JsonConvert.SerializeObject(result,Formatting.Indented));
-            progress.Report(8,"success","输出："+output);
+            progress.Report(8,complete?"success":"warning",(complete?"输出：":"部分完成，已输出：")+output);
             progress.Report(8,"info","源码工程："+result.SourceProject);
             progress.Report(8,"info","字符串搜索索引："+result.StringIndex);
             progress.Report(8,"info","完整阶段日志："+Path.Combine(run,"progress.log"));
-            Console.WriteLine("完成："+output);
-            return 0;
+            Console.WriteLine((complete?"完成：":"部分完成：")+output);
+            return complete?0:2;
         }
         catch(Exception ex){progress?.Failure(ex.Message);Console.Error.WriteLine(ex.Message);return 1;}
         finally{progress?.Dispose();}

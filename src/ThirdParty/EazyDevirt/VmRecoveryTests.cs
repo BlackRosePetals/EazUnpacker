@@ -5,6 +5,8 @@ using AsmResolver.DotNet.Signatures;
 using AsmResolver.PE.DotNet.Cil;
 using EazyDevirt.Core.Architecture;
 using EazyDevirt.Core.IO;
+using EazyDevirt.PatternMatching;
+using EazyDevirt.PatternMatching.Patterns.OpCodes;
 using MethodAttributes = AsmResolver.PE.DotNet.Metadata.Tables.MethodAttributes;
 using TypeAttributes = AsmResolver.PE.DotNet.Metadata.Tables.TypeAttributes;
 
@@ -53,6 +55,55 @@ public static class VmRecoveryTests
         try { IndirectStoreResolver.Rewrite(ambiguous); throw new Exception("Accepted an unresolved store join."); }
         catch (NotSupportedException) { }
         Console.WriteLine("PASS: byte/int/float/reference/struct indirect stores execute correctly; unresolved joins rejected.");
+        CheckFieldLoadPatterns();
+    }
+
+    private static void CheckFieldLoadPatterns()
+    {
+        var module=new ModuleDefinition("FieldLoadFixture.dll",KnownCorLibs.MsCorLib_v4_0_0_0);
+        var type=new TypeDefinition("Fixture","FieldLoads",TypeAttributes.Public,module.CorLibTypeFactory.Object.Type);
+        module.TopLevelTypes.Add(type);
+        var getValue=module.DefaultImporter.ImportMethod(typeof(FieldInfo).GetMethod("GetValue",new[]{typeof(object)})!);
+        var fieldType=module.DefaultImporter.ImportMethod(typeof(FieldInfo).GetProperty("FieldType")!.GetGetMethod()!);
+        var declaringType=module.DefaultImporter.ImportMethod(typeof(MemberInfo).GetProperty("DeclaringType")!.GetGetMethod()!);
+        var convert=new MethodDefinition("Convert",MethodAttributes.Private|MethodAttributes.Static,
+            MethodSignature.CreateStatic(module.CorLibTypeFactory.Object,module.CorLibTypeFactory.Object,module.DefaultImporter.ImportType(typeof(Type)).ToTypeSignature()));
+        var push=new MethodDefinition("Push",MethodAttributes.Private,
+            MethodSignature.CreateInstance(module.CorLibTypeFactory.Void,module.CorLibTypeFactory.Object));
+        type.Methods.Add(convert);type.Methods.Add(push);
+        var cases=new[]{
+            (Field:1,Instance:3,Property:1,Long:false,CorrectProperty:true,Match:true),
+            (Field:1,Instance:2,Property:1,Long:false,CorrectProperty:true,Match:true),
+            (Field:5,Instance:6,Property:5,Long:true,CorrectProperty:true,Match:true),
+            (Field:1,Instance:3,Property:2,Long:false,CorrectProperty:true,Match:false),
+            (Field:5,Instance:6,Property:5,Long:true,CorrectProperty:false,Match:false)
+        };
+        foreach(var test in cases)
+        {
+            var handler=new MethodDefinition("Handler",MethodAttributes.Private,
+                MethodSignature.CreateInstance(module.CorLibTypeFactory.Void,module.CorLibTypeFactory.Object));
+            type.Methods.Add(handler);
+            handler.CilMethodBody=new CilMethodBody();
+            for(int i=0;i<8;i++)handler.CilMethodBody.LocalVariables.Add(new CilLocalVariable(module.CorLibTypeFactory.Object));
+            CilInstruction Load(int slot)=>test.Long
+                ?new CilInstruction(CilOpCodes.Ldloc,handler.CilMethodBody.LocalVariables[slot])
+                :slot switch {
+                    1=>new CilInstruction(CilOpCodes.Ldloc_1),2=>new CilInstruction(CilOpCodes.Ldloc_2),
+                    3=>new CilInstruction(CilOpCodes.Ldloc_3),_=>throw new ArgumentOutOfRangeException(nameof(slot))};
+            var instructions=handler.CilMethodBody.Instructions;
+            instructions.Add(new CilInstruction(CilOpCodes.Nop));
+            instructions.Add(new CilInstruction(CilOpCodes.Ldarg_0));
+            instructions.Add(Load(test.Field));instructions.Add(Load(test.Instance));
+            instructions.Add(new CilInstruction(CilOpCodes.Callvirt,getValue));
+            instructions.Add(Load(test.Property));
+            instructions.Add(new CilInstruction(CilOpCodes.Callvirt,test.CorrectProperty?fieldType:declaringType));
+            instructions.Add(new CilInstruction(CilOpCodes.Call,convert));
+            instructions.Add(new CilInstruction(CilOpCodes.Callvirt,push));
+            instructions.Add(new CilInstruction(CilOpCodes.Ret));
+            if(PatternMatcher.MatchesPattern(new Ldfld(),handler)!=test.Match)
+                throw new Exception("Instance field load recognition depends on local slots or accepts a different field/property.");
+        }
+        Console.WriteLine("PASS: instance field loads recognize shuffled/long local slots and reject different FieldInfo/property loads.");
     }
 
     private static VMMethod Build(MethodDefinition method, params CilInstruction[] instructions)

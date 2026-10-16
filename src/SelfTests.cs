@@ -12,6 +12,7 @@ internal static class SelfTests
         {
             EazyDevirt.CipherStreamTests.Run();
             EazyDevirt.VmRecoveryTests.Run();
+            CheckRecoveryCheckpoint(root);
             CheckControlFlow();
             ControlFlowCleanupTests.Run(root);
             SourceCompatibilityTests.Run(root);
@@ -41,6 +42,35 @@ internal static class SelfTests
             Console.WriteLine("PASS: uncompressed/compressed bundle, traversal, absolute path, truncation, offset bounds."); return 0;
         }
         finally { Directory.Delete(root, true); }
+    }
+
+    private static void CheckRecoveryCheckpoint(string root)
+    {
+        string directory=Path.Combine(root,"checkpoint");Directory.CreateDirectory(directory);
+        string report=Path.Combine(directory,"result.json");
+        var result=new SampleResult {Output="first.exe",Status="partial"};
+        RecoveryPipeline.WriteResult(result,directory);
+        using(var locked=new System.Threading.ManualResetEventSlim())
+        {
+            var reader=System.Threading.Tasks.Task.Run(()=>
+            {
+                using(var stream=new FileStream(report,FileMode.Open,FileAccess.Read,FileShare.Read))
+                {
+                    locked.Set();
+                    System.Threading.Thread.Sleep(500);
+                }
+            });
+            locked.Wait();
+            result.Output="second.exe";
+            RecoveryPipeline.WriteResult(result,directory);
+            reader.GetAwaiter().GetResult();
+        }
+        result.Output="final.exe";result.Status="complete";
+        RecoveryPipeline.WriteResult(result,directory);
+        var saved=Newtonsoft.Json.JsonConvert.DeserializeObject<SampleResult>(File.ReadAllText(report))!;
+        if(saved.Output!="final.exe" || saved.Status!="complete" || File.Exists(report+".pending"))
+            throw new Exception("Recovery checkpoint replacement lost data or leaked a pending file.");
+        Console.WriteLine("PASS: recovery checkpoints survive a temporary Windows reader lock and retain the final output/status.");
     }
 
     private static void CheckRebuiltMapping(string root)

@@ -1,3 +1,5 @@
+using AsmResolver.DotNet;
+using AsmResolver.DotNet.Code.Cil;
 using AsmResolver.DotNet.Serialized;
 using AsmResolver.PE.DotNet.Cil;
 using EazyDevirt.Core.Abstractions;
@@ -25,12 +27,16 @@ internal record Ldfld : IOpCodePattern
     public override CilOpCode? CilOpCode => CilOpCodes.Ldfld;
 
     public override bool MatchEntireBody => false;
+    public override bool InterchangeLdlocOpCodes => true;
 
-    public override bool Verify(VMOpCode vmOpCode, int index)
+    public override bool Verify(CilInstructionCollection instructions, int index)
     {
-        var instructions = vmOpCode.SerializedDelegateMethod.CilMethodBody!.Instructions;
-        if (instructions.Count < index + 3) return false;
-        return (instructions[index + 3].Operand as SerializedMemberReference)?.FullName == "System.Object System.Reflection.FieldInfo::GetValue(System.Object)";
+        if (instructions.Count < index + Pattern.Count) return false;
+        // Local allocation differs between VM versions. Both reflection calls
+        // must still use the same FieldInfo; only its local slot may change.
+        return instructions[index + 1].GetLocalVariableIndex() == instructions[index + 4].GetLocalVariableIndex() &&
+            (instructions[index + 3].Operand as IMethodDescriptor)?.FullName == "System.Object System.Reflection.FieldInfo::GetValue(System.Object)" &&
+            (instructions[index + 5].Operand as IMethodDescriptor)?.FullName == "System.Type System.Reflection.FieldInfo::get_FieldType()";
     }
 }
 

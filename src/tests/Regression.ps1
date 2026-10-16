@@ -2,7 +2,8 @@ param(
     [string]$SampleRoot = (Join-Path $PSScriptRoot '..\..\样本'),
     [switch]$CheckRepeat,
     [switch]$CheckKeyRejection,
-    [switch]$IncludeAva
+    [switch]$IncludeAva,
+    [string]$ResultRoot = (Join-Path $PSScriptRoot '..\test-results\final-single-file')
 )
 $ErrorActionPreference = 'Stop'
 function Get-WorkReport([string]$outputFile) {
@@ -13,7 +14,7 @@ function Get-WorkReport([string]$outputFile) {
 }
 $exe = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\bin\Release\net48\Unpacker.exe'))
 if (!(Test-Path -LiteralPath $exe)) { throw 'Unpacker.exe 尚未构建' }
-$resultRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\test-results\final-single-file'))
+$resultRoot = [IO.Path]::GetFullPath($ResultRoot)
 New-Item -ItemType Directory -Path $resultRoot -Force | Out-Null
 $samples = @(
     @{ Relative='EAZ202101\ggggg.exe'; Name='ggggg'; Output='ggggg.exe'; Vm=32; Regions=2 },
@@ -65,10 +66,13 @@ foreach ($sample in $samples) {
     }
     if ($sample.Name -eq 'crk2' -and $item.After.Resources -ne 6) { throw '资源恢复数量不符' }
     if ($sample.Name -eq 'SKUFSLIUNX-033') {
-        if ($item.After.StringLiterals -ne 7830 -or ($item.Stages | Where-Object Name -eq 'Bundle').Changes -ne 4) { throw '单文件或字符串恢复数量不符' }
+        # The naming stage removes statically unreachable IL, including ldstr.
+        # Check all decoded table entries before cleanup, then compare the
+        # published payload's surviving literals with the final inspection.
+        if (($item.Stages | Where-Object Name -eq 'RvaStrings').Changes -ne 7830 -or $item.After.StringLiterals -le 0 -or ($item.Stages | Where-Object Name -eq 'Bundle').Changes -ne 4) { throw '单文件或字符串恢复数量不符' }
         $packed = & $exe analyzer $outputFile | ConvertFrom-Json
         if ($LASTEXITCODE -ne 0 -or !$packed.Bundle -or @($packed.Payloads).Count -ne 4 -or
-            @($packed.Assemblies | Where-Object { $_.File -eq 'SKUFStools.dll' -and $_.Info.StringLiterals -eq 7830 }).Count -ne 1) { throw '单文件 EXE 的载荷或恢复字符串不符' }
+            @($packed.Assemblies | Where-Object { $_.File -eq 'SKUFStools.dll' -and $_.Info.StringLiterals -eq $item.After.StringLiterals }).Count -ne 1) { throw '单文件 EXE 的载荷或恢复字符串不符' }
         foreach ($file in @('SKUFStools.runtimeconfig.json','SKUFStools.deps.json','System.IO.Ports.dll')) {
             if (!(Test-Path -LiteralPath (Join-Path (Join-Path $item.DiagnosticsDirectory 'bundle') $file))) { throw ('缺少缓存依赖：'+$file) }
         }
@@ -143,9 +147,9 @@ if ($CheckKeyRejection) {
         & (Join-Path $isolatedBin 'Unpacker.exe') unpack $gg.Input $negativeOutput
         if ($LASTEXITCODE -ne 2) { throw '错误密钥未报告部分恢复' }
         $negative=Get-Content -LiteralPath (Get-WorkReport $negativeOutput) -Raw | ConvertFrom-Json
-        if ((Test-Path -LiteralPath $negativeOutput) -or $negative.After.VirtualizedMethods.Count -ne 2 -or ($negative.Stages | Where-Object Name -eq 'VM').Changes -ne 30) { throw '错误密钥被接受或部分结果被发布' }
+        if (!(Test-Path -LiteralPath $negativeOutput) -or $negative.After.VirtualizedMethods.Count -ne 2 -or ($negative.Stages | Where-Object Name -eq 'VM').Changes -ne 30) { throw '错误密钥被接受或部分恢复文件未输出' }
     } finally { $env:UNPACKER_VM_INT32_KEYS=$previousKeys; $env:UNPACKER_VM_KEY_SEARCH_LIMIT=$previousLimit }
-    Write-Output 'PASS: 错误密钥被拒绝，保留原始方法体，未发布部分结果。'
+    Write-Output 'PASS: 错误密钥被拒绝，保留未恢复的原始方法体，部分恢复文件仍输出。'
 }
 if ($CheckRepeat) {
     foreach ($original in @($reports | Where-Object { $_.Input -eq $gg.Input -or $_.After.ModernRuntime })) {
@@ -164,4 +168,6 @@ if ($CheckRepeat) {
 }
 $hashes | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $resultRoot 'hashes.json') -Encoding UTF8
 Write-Output ('PASS: '+$samples.Count+' 个原件未变；完整 C# 工程全部重新构建；'+($samples | Measure-Object Vm -Sum).Sum+' 个 VM 方法恢复。')
+# Expected CLI rejection probes above leave LASTEXITCODE=1.
+exit 0
 

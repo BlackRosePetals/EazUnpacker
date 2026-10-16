@@ -81,6 +81,7 @@ internal static class RecoveryPipeline
             string sourceConfig = target + ".config";
             if (File.Exists(sourceConfig)) File.Copy(sourceConfig, cleaned + ".config");
             var postStrings = AssemblyInspector.Inspect(cleaned);
+            RememberOutput(result,cleaned,dir);
             ProgressEvents.Send(2,"success","字符串/资源阶段结束；待还原 VM 方法："+postStrings.VirtualizedMethods.Count);
             if (postStrings.VirtualizedMethods.Count > 0 && !noVm)
             {
@@ -90,11 +91,13 @@ internal static class RecoveryPipeline
                 int code = ProcessRunner.Run(Assembly.GetExecutingAssembly().Location, new[] { "--vm-worker", cleaned, devirt, countFile }, Path.Combine(dir, "vm.log"), Math.Max(1, timeout / 2));
                 int count = File.Exists(countFile) ? int.Parse(File.ReadAllText(countFile)) : 0;
                 ProgressEvents.Send(3,code==0 && count==postStrings.VirtualizedMethods.Count?"success":"warning","VM 已还原 "+count+"/"+postStrings.VirtualizedMethods.Count+"，后端退出码 "+code);
-                result.Stages.Add(new StageResult { Name = "VM", Status = code == 0 && count > 0 ? "success" : "failed", Changes = count, Detail = "Backend exit " + code + "; see vm.log." });
+                result.Stages.Add(new StageResult { Name = "VM", Status = code == 0 && count == postStrings.VirtualizedMethods.Count ? "success" : count > 0 ? "partial" : "failed", Changes = count,
+                    Detail = "Restored "+count+"/"+postStrings.VirtualizedMethods.Count+"; backend exit " + code + "; see vm-methods.json and vm.log." });
                 if (code == 0 && count > 0 && File.Exists(devirt))
                 {
                     if (File.Exists(cleaned + ".config")) File.Copy(cleaned + ".config", devirt + ".config");
                     cleaned = devirt;
+                    RememberOutput(result,cleaned,dir);
                     if (!postStrings.ModernRuntime)
                     {
                         string final = Path.Combine(dir, Path.GetFileNameWithoutExtension(target) + "-unpacked" + Path.GetExtension(target));
@@ -108,6 +111,7 @@ internal static class RecoveryPipeline
                             result.Stages.AddRange(stages);
                             if (File.Exists(cleaned + ".config")) File.Copy(cleaned + ".config", final + ".config");
                             cleaned = final;
+                            RememberOutput(result,cleaned,dir);
                         }
                         else result.Stages.Add(new StageResult { Name = "PostVM.Strings", Status = "failed", Detail = "Backend exit " + stringsCode + "; see post-vm-strings.log." });
                     }
@@ -122,6 +126,7 @@ internal static class RecoveryPipeline
             {
                 if(File.Exists(cleaned+".config"))File.Copy(cleaned+".config",compatible+".config");
                 cleaned=compatible;
+                RememberOutput(result,cleaned,dir);
                 result.Stages.Add(new StageResult{Name="IntegrityCompatibility",Status="success",Changes=integrity,
                     Detail="Adapted identified self-signature guards invalidated by rewriting; other checks retained; see integrity-compatibility.json."});
             }
@@ -131,6 +136,7 @@ internal static class RecoveryPipeline
             result.Stages.Add(new StageResult{Name="Names",Status="success",Changes=renamed,Detail="Stable readable metadata names, references, resources and PDB locals recovered."});
             if(File.Exists(cleaned+".config"))File.Copy(cleaned+".config",named+".config");
             cleaned=named;
+            RememberOutput(result,cleaned,dir);
             // Literal conditional branches are folded inside the naming stage's
             // single final write (see NameRecoveryPass), so the adjusted
             // per-method max-stack values stay authoritative and no extra
@@ -172,12 +178,37 @@ internal static class RecoveryPipeline
             else ProgressEvents.Send(5,"info","没有待验证的 VM 方法，跳过 CLR 准备检查");
             result.Stages.Add(new StageResult { Name = "Validation", Status = "success", Detail = "Output metadata reloaded. Full business/UI equivalence requires additional checks." });
             bool changed = result.Stages.Any(s => s.Changes > 0);
-            bool pending = result.Stages.Any(s => s.Status == "failed" || s.Status == "skipped") || result.After.VirtualizedMethods.Count > 0 ||
+            bool pending = result.Stages.Any(s => s.Status is "failed" or "skipped" or "partial") || result.After.VirtualizedMethods.Count > 0 ||
                 result.After.StringLiterals == 0 && result.Before.StringInt32Calls > 0;
             result.Status = changed && !pending ? "complete" : "partial";
             return result.Status == "complete" ? 0 : 2;
         }
         catch (Exception ex) { ProgressEvents.Send(ProgressEvents.CurrentStage,"error","恢复后端异常："+ex.Message);result.Stages.Add(new StageResult { Name = "Worker", Status = "failed", Detail = ex.ToString() }); return 1; }
-        finally { File.WriteAllText(Path.Combine(dir, "result.json"), JsonConvert.SerializeObject(result, Formatting.Indented)); }
+        finally { WriteResult(result,dir); }
+    }
+
+    private static void RememberOutput(SampleResult result,string output,string directory)
+    {
+        result.Output=output;
+        result.Status="partial";
+        WriteResult(result,directory);
+    }
+
+    internal static void WriteResult(SampleResult result,string directory)
+    {
+        string report=Path.Combine(directory,"result.json"),pending=report+".pending";
+        try
+        {
+            File.WriteAllText(pending,JsonConvert.SerializeObject(result,Formatting.Indented));
+            // File scanners can briefly hold the previous checkpoint without
+            // delete sharing on Windows. Retain the pending snapshot and retry.
+            for(int attempt=0;;attempt++)
+            {
+                try {if(File.Exists(report))File.Replace(pending,report,null);else File.Move(pending,report);break;}
+                catch(IOException ex) when(attempt<4 && (ex.HResult&0xffff) is 32 or 33 or 1175)
+                {System.Threading.Thread.Sleep(150<<attempt);}
+            }
+        }
+        finally { if(File.Exists(pending))File.Delete(pending); }
     }
 }
