@@ -1,5 +1,6 @@
 using AsmResolver.DotNet;
 using AsmResolver.DotNet.Code.Cil;
+using AsmResolver.DotNet.Signatures;
 using AsmResolver.PE.DotNet.Cil;
 
 namespace EazyDevirt.Core.Architecture;
@@ -19,6 +20,12 @@ internal record VMMethod(MethodDefinition Parent, string EncodedMethodKey, long 
     public List<uint> VirtualOffsets { get; set; } = new();
     public int EncryptedRegions { get; set; }
     public string? Failure { get; set; }
+    public CilInstruction? ExecutorInstruction { get; set; }
+    public MethodDefinition? RecoveredAdapter { get; set; }
+    public List<MethodDefinition> AccessBridges { get; } = new();
+    public TypeDefinition? AdapterDeclaringType { get; set; }
+    public TypeSignature[]? ArgumentTypes { get; set; }
+    public bool Inlined => RecoveredAdapter != null;
     
     
     public bool SuccessfullyDevirtualized { get; set; }

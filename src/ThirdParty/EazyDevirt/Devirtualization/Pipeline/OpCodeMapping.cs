@@ -89,6 +89,7 @@ internal class OpCodeMapping : StageBase
 
     public override bool Run()
     {
+        using var normalization = new RuntimePatternNormalization(Ctx.VMDeclaringType);
         if (!Init()) return false;
         Ctx.OperandLayout = VMFormatDiscovery.OperandTypes(Ctx.VMDeclaringType);
         Ctx.InlineLayout = VMFormatDiscovery.InlineTypes(Ctx.VMDeclaringType);

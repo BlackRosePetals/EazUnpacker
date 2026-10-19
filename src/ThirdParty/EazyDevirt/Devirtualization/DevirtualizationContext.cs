@@ -17,6 +17,8 @@ internal record DevirtualizationContext
     public ModuleDefinition Module { get; }
     public PatternMatcher PatternMatcher { get; }
     public ConsoleLogger Console { get; }
+    public List<VerifiedKeyRecord> VerifiedKeys { get; } = new();
+    public Dictionary<MethodDefinition,(string Namespace,string TypeName,string MethodName,string FullName)> OriginalMethodNames { get; } = new();
     public Action<string,int,int>? Progress {get;set;}
     public ReferenceImporter Importer { get; }
     
@@ -58,11 +60,21 @@ internal record DevirtualizationContext
     {
         Options = opts;
         Module = ModuleDefinition.FromFile(Options.Assembly.FullName);
+        foreach(var type in Module.GetAllTypes())
+        {
+            var top=type;while(top.DeclaringType!=null)top=top.DeclaringType;
+            string ns=top.Namespace?.ToString()??"";
+            string qualified=type.FullName;
+            string typeName=ns.Length>0&&qualified.StartsWith(ns+".",StringComparison.Ordinal)?qualified.Substring(ns.Length+1):qualified;
+            foreach(var method in type.Methods)OriginalMethodNames[method]=(ns,typeName,method.Name?.ToString()??"",method.FullName);
+        }
         if(Module.MetadataResolver is DefaultMetadataResolver metadata && metadata.AssemblyResolver is AssemblyResolverBase resolver)
         {
             resolver.SearchDirectories.Add(Path.GetDirectoryName(Options.Assembly.FullName)!);
             resolver.SearchDirectories.Add(AppDomain.CurrentDomain.BaseDirectory);
             resolver.SearchDirectories.Add(Path.GetDirectoryName(typeof(object).Assembly.Location)!);
+            foreach (string directory in RuntimeReferencePaths.Discover(Module).Reverse())
+                resolver.SearchDirectories.Insert(0, directory);
         }
         PatternMatcher = new PatternMatcher();
         Console = new ConsoleLogger();

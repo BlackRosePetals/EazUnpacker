@@ -1,9 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using dnlib.DotNet;
-using dnlib.DotNet.Emit;
 using dnlib.DotNet.Writer;
 using EazFixer.Processors;
 
@@ -32,20 +30,22 @@ namespace EazFixer
             var ctx = new EazContext(Flags.InFile, processors);
             try
             {
+                results.Add(new FixerStageResult { Name = "DecoderRuntime", Status = "success", Changes = 0,
+                    Detail = "Isolated decoder runtime: " + ctx.RuntimePath + "; <Module> initializer suppressed only in runtime copy: " + ctx.RuntimeInitializerSuppressed + ". Output initializer retained." });
                 StacktracePatcher.Patch();
                 foreach (var proc in processors){progress?.Invoke(proc.GetType().Name+" 初始化","start",0);proc.Initialize(ctx);}
                 foreach (var proc in processors)
                 {
-                    int before = CountStrings(ctx.Module);
                     int resources = ctx.Module.Resources.Count;
                     progress?.Invoke(proc.GetType().Name,"start",0);
                     if (proc.Initialized) proc.Process();
                     if (proc.Processed) proc.Cleanup();
-                    int changes = proc is StringFixer ? CountStrings(ctx.Module)-before : ctx.Module.Resources.Count-resources;
+                    int changes = proc is StringFixer strings ? strings.RecoveredCount : proc is Processors.AssemblyResolver assemblies
+                        ? assemblies.ExtractedCount : ctx.Module.Resources.Count-resources;
                     results.Add(new FixerStageResult {
                         Name = proc.GetType().Name,
-                        Status = proc.Processed ? "success" : !proc.Initialized ? "not-detected" : "failed",
-                        Detail = proc.ErrorMessage ?? "Processed; runtime types preserved.", Changes = changes });
+                        Status = proc.Processed ? proc.WarningCount > 0 ? "partial" : "success" : proc.NotDetected ? "not-detected" : "failed",
+                        Detail = proc.DetailMessage, Changes = changes });
                     progress?.Invoke(proc.GetType().Name,results[results.Count-1].Status,changes);
                 }
                 if(runControlFlow)
@@ -56,6 +56,7 @@ namespace EazFixer
                     results.Add(new FixerStageResult{Name="ControlFlow",Status="success",Detail="Constant branches folded; protected regions preserved.",Changes=flowChanges});
                 }
                 progress?.Invoke("写入恢复程序集","start",0);
+                PrepareForWrite(ctx.Module);
                 ctx.Module.Write(Flags.OutFile, new ModuleWriterOptions(ctx.Module) { MetadataOptions = { Flags = MetadataFlags.PreserveAll } });
                 return results;
             }
@@ -66,7 +67,18 @@ namespace EazFixer
             }
         }
 
-        private static int CountStrings(ModuleDef module) => module.GetTypes().SelectMany(t=>t.Methods)
-            .Where(m=>m.HasBody).Sum(m=>m.Body.Instructions.Count(i=>i.OpCode.Code==Code.Ldstr));
+        internal static void PrepareForWrite(ModuleDef module)
+        {
+            // A non-adjacent argument replacement inserts pop/ldstr even when the
+            // control-flow pass is disabled. Recompute branch widths for that path
+            // too; short branches loaded from disk may no longer span the body.
+            foreach (var type in module.GetTypes())
+                foreach (var method in type.Methods)
+                    if (method.HasBody)
+                    {
+                        method.Body.SimplifyBranches();
+                        method.Body.OptimizeBranches();
+                    }
+        }
     }
 }

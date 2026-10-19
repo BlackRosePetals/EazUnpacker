@@ -14,6 +14,7 @@ internal class Resolver
         Ctx = ctx;
         VMStreamReader = new VMBinaryReader(new CryptoStreamV3(Ctx.VMResolverStream, Ctx.MethodCryptoKey, true));
         Cache = new Dictionary<int, object?>();
+        OriginalTypeReferences = ctx.Module.GetImportedTypeReferences().ToArray();
     }
     
     private DevirtualizationContext Ctx { get; }
@@ -21,6 +22,7 @@ internal class Resolver
     private VMBinaryReader VMStreamReader { get; }
     
     private Dictionary<int, object?> Cache { get; }
+    private TypeReference[] OriginalTypeReferences { get; }
 
     public ITypeDefOrRef? ResolveType(VMInlineOperand inlineOperand)
     {
@@ -115,6 +117,10 @@ internal class Resolver
     {
         if(signature is TypeDefOrRefSignature named)
         {
+            var original = OriginalTypeReferences.Where(reference => reference.FullName == named.FullName).ToArray();
+            var exactAssembly = original.Where(reference => reference.Scope?.GetAssembly()?.Name == named.Type.Scope?.GetAssembly()?.Name).ToArray();
+            if (exactAssembly.Length == 1 || original.Length == 1)
+                named = new TypeDefOrRefSignature(exactAssembly.Length == 1 ? exactAssembly[0] : original[0], named.IsValueType);
             var type=named.Type.Resolve();
             if(type==null && named.Type is TypeReference reference && SignatureComparer.Default.Equals(reference.Scope?.GetAssembly(),Ctx.Module.Assembly))
             {
@@ -123,9 +129,27 @@ internal class Resolver
                     .Select(r=>r.Resolve()).Where(t=>t!=null).Distinct().ToArray();
                 if(type==null && candidates.Length==1)type=candidates[0];
             }
-            if(type!=null)return type.DeclaringModule==Ctx.Module ? type.ToTypeSignature() : Ctx.Importer.ImportTypeSignature(type.ToTypeSignature());
+            if(type!=null)
+            {
+                if (type.DeclaringModule == Ctx.Module) return type.ToTypeSignature();
+                // Resolving a facade/reference against an installed runtime is
+                // only metadata evidence. Do not turn that runtime's version
+                // into a new public dependency of the recovered target.
+                var existing = OriginalTypeReferences.Where(reference => reference.FullName == named.FullName).ToArray();
+                var sameAssembly = existing.Where(reference => reference.Scope?.GetAssembly()?.Name == named.Type.Scope?.GetAssembly()?.Name).ToArray();
+                ITypeDefOrRef owner = sameAssembly.Length == 1 ? sameAssembly[0] : existing.Length == 1 ? existing[0] : named.Type;
+                return new TypeDefOrRefSignature(owner, type.IsValueType);
+            }
+            // Reflection's serialized type name does not encode CLASS versus
+            // VALUETYPE. Recover that bit from an existing metadata signature
+            // when its dependency is missing, rather than defaulting a struct
+            // (e.g. EvaluateOnce<T>) to a reference type in locals and calls.
+            if (FindExistingTypeClassification(Ctx.Module, named.Type) is bool valueType)
+                return new TypeDefOrRefSignature(named.Type, valueType);
         }
         else if(signature is SzArrayTypeSignature array)return new SzArrayTypeSignature(RepairTypeScope(array.BaseType));
+        else if(signature is ArrayTypeSignature multiArray)return new ArrayTypeSignature(RepairTypeScope(multiArray.BaseType), multiArray.Dimensions.ToArray());
+        else if(signature is PointerTypeSignature pointer)return new PointerTypeSignature(RepairTypeScope(pointer.BaseType));
         else if(signature is ByReferenceTypeSignature reference)return new ByReferenceTypeSignature(RepairTypeScope(reference.BaseType));
         else if(signature is GenericInstanceTypeSignature generic)
         {
@@ -133,6 +157,34 @@ internal class Resolver
             return new GenericInstanceTypeSignature(definition.ToTypeDefOrRef(), definition.IsValueType, generic.TypeArguments.Select(RepairTypeScope).ToArray());
         }
         return signature;
+    }
+
+    internal static bool? FindExistingTypeClassification(ModuleDefinition module, ITypeDefOrRef type)
+    {
+        IEnumerable<(ITypeDefOrRef Type, bool ValueType)> Types(TypeSignature signature)
+        {
+            if (signature is GenericInstanceTypeSignature generic)
+            {
+                yield return (generic.GenericType, generic.IsValueType);
+                foreach (var argument in generic.TypeArguments)
+                    foreach (var item in Types(argument)) yield return item;
+            }
+            else if (signature is TypeDefOrRefSignature named) yield return (named.Type, named.IsValueType);
+            else if (signature is ByReferenceTypeSignature byRef)
+                foreach (var item in Types(byRef.BaseType)) yield return item;
+            else if (signature is SzArrayTypeSignature array)
+                foreach (var item in Types(array.BaseType)) yield return item;
+            else if (signature is PointerTypeSignature pointer)
+                foreach (var item in Types(pointer.BaseType)) yield return item;
+        }
+        var classifications = module.GetImportedMemberReferences().SelectMany(reference => reference.Signature switch
+            {
+                MethodSignature method => new[] { method.ReturnType }.Concat(method.ParameterTypes),
+                FieldSignature field => new[] { field.FieldType },
+                _ => Enumerable.Empty<TypeSignature>()
+            }).SelectMany(Types).Where(item => SignatureComparer.Default.Equals(item.Type, type))
+            .Select(item => item.ValueType).Distinct().ToArray();
+        return classifications.Length == 1 ? classifications[0] : null;
     }
     
     public IFieldDescriptor? ResolveField(int position)
@@ -153,7 +205,7 @@ internal class Resolver
         if (!inlineOperand.HasData || inlineOperand.Data is not VMFieldData data)
             throw new Exception("VM inline operand expected to have field data!");
 
-        var declaringType = ResolveType(data.DeclaringType.Position);
+        var declaringType = OpenGenericOwner(ResolveType(data.DeclaringType.Position));
         if (declaringType is null)
         {
             Ctx.Console.Error($"Unable to resolve vm field {data.Name} declaring type!");
@@ -178,6 +230,9 @@ internal class Resolver
 
     private IMethodDescriptor? ResolveMethod(string name, ITypeDefOrRef declaringTypeDefOrRef, MethodSignature vmMethodSig, TypeSignature[] vmParameters, GenericContext vmGenericContext)
     {
+        declaringTypeDefOrRef = OpenGenericOwner(declaringTypeDefOrRef)!;
+        if (vmGenericContext.Type == null)
+            vmGenericContext = GenericContext.FromType(declaringTypeDefOrRef).WithMethod(vmGenericContext.Method!);
         // Methods utilizing generics need to be resolved to get 100% accuracy.
         // This is because Eazfuscator uses the actual generic type instead of the generic parameter type.
         // Example:
@@ -196,9 +251,24 @@ internal class Resolver
             var declaringTypeDef = resolvedDeclaringType;
             if (declaringTypeDef is null)
             {
+                // A missing dependency need not force a guessed generic signature:
+                // the target may already contain the exact open MemberRef. Match
+                // its instantiated signature, then retain the original !/!! slots.
+                var existing = FindExistingMethodReference(Ctx.Module, name, declaringTypeDefOrRef, vmMethodSig, vmGenericContext);
+                if (existing != null)
+                {
+                    Ctx.Console.Info($"Resolved missing-dependency call from existing metadata signature {existing.MetadataToken}: {existing.FullName}");
+                    return vmGenericContext.Method?.TypeArguments.Count > 0
+                        ? existing.MakeGenericInstanceMethod(vmGenericContext.Method.TypeArguments.ToArray()) : existing;
+                }
                 if (Ctx.Options.RequireDepsForGenericMethods)
                 {
-                    Ctx.Console.Error($"Unable to resolve generic method {name} declaring type (Assembly: {declaringTypeDefOrRef.Scope?.GetAssembly()?.FullName})!");
+                    Ctx.Console.Error($"Unable to resolve generic method {declaringTypeDefOrRef.FullName}::{name}: {vmMethodSig} (Assembly: {declaringTypeDefOrRef.Scope?.GetAssembly()?.FullName})!");
+                    foreach (var candidate in Ctx.Module.GetImportedMemberReferences().Where(reference => reference.Name == name && reference.DeclaringType?.FullName == declaringTypeDefOrRef.FullName && reference.Signature is MethodSignature))
+                    {
+                        var signature = ((MethodSignature)candidate.Signature!).InstantiateGenericTypes(vmGenericContext);
+                        Ctx.Console.Warning($"Existing metadata candidate {candidate.MetadataToken}: {signature}; scope matches={SignatureComparer.Default.Equals(candidate.DeclaringType, declaringTypeDefOrRef)}; return element={signature.ReturnType.ElementType}/{vmMethodSig.ReturnType.ElementType}; value type={signature.ReturnType.IsValueType}/{vmMethodSig.ReturnType.IsValueType}");
+                    }
                     return null;
                 }
                 
@@ -231,7 +301,11 @@ internal class Resolver
                 // Instantiate the definition, including generics nested in by-ref,
                 // array and generic-instance signatures. Parameters also exposes
                 // the implicit receiver and is not the metadata signature list.
-                var realMethodSignature = method.Signature.InstantiateGenericTypes(vmGenericContext);
+                var sourceSignature = method.Signature.InstantiateGenericTypes(vmGenericContext);
+                var scopedSignature = sourceSignature.HasThis ? MethodSignature.CreateInstance(RepairTypeScope(sourceSignature.ReturnType), sourceSignature.GenericParameterCount, sourceSignature.ParameterTypes.Select(RepairTypeScope)) :
+                    MethodSignature.CreateStatic(RepairTypeScope(sourceSignature.ReturnType), sourceSignature.GenericParameterCount, sourceSignature.ParameterTypes.Select(RepairTypeScope));
+                var realMethodSignature = NormalizeReflectionArrays(scopedSignature);
+                vmMethodSig = NormalizeReflectionArrays(vmMethodSig);
                 if (SignatureComparer.Default.Equals(realMethodSignature, vmMethodSig))
                     exactMatches.Add(method);
     
@@ -252,7 +326,10 @@ internal class Resolver
             if (exactMatches.Count != 0) matches = exactMatches;
             if (matches.Count == 1)
             {
-                var reference = declaringTypeDefOrRef.CreateMemberReference(matches[0].Name, matches[0].Signature);
+                var signature = matches[0].Signature!;
+                var emittedSignature = signature.HasThis ? MethodSignature.CreateInstance(RepairTypeScope(signature.ReturnType), signature.GenericParameterCount, signature.ParameterTypes.Select(RepairTypeScope)) :
+                    MethodSignature.CreateStatic(RepairTypeScope(signature.ReturnType), signature.GenericParameterCount, signature.ParameterTypes.Select(RepairTypeScope));
+                var reference = declaringTypeDefOrRef.CreateMemberReference(matches[0].Name, emittedSignature);
                 return vmGenericContext.Method?.TypeArguments.Count > 0
                     ? reference.MakeGenericInstanceMethod(vmGenericContext.Method.TypeArguments.ToArray()) : reference;
             }
@@ -265,7 +342,64 @@ internal class Resolver
         
         return declaringTypeDefOrRef.CreateMemberReference(name, vmMethodSig);
     }
+
+    private static MethodSignature NormalizeReflectionArrays(MethodSignature signature)
+    {
+        TypeSignature Normalize(TypeSignature type) => type switch
+        {
+            ArrayTypeSignature array => new ArrayTypeSignature(Normalize(array.BaseType), array.Dimensions.Count),
+            SzArrayTypeSignature array => new SzArrayTypeSignature(Normalize(array.BaseType)),
+            PointerTypeSignature pointer => new PointerTypeSignature(Normalize(pointer.BaseType)),
+            ByReferenceTypeSignature reference => new ByReferenceTypeSignature(Normalize(reference.BaseType)),
+            GenericInstanceTypeSignature generic => new GenericInstanceTypeSignature(generic.GenericType, generic.IsValueType, generic.TypeArguments.Select(Normalize).ToArray()),
+            _ => type
+        };
+        // Reflection serializes array rank but loses explicit zero lower
+        // bounds. Compare that shape, then emit the original metadata signature.
+        return signature.HasThis ? MethodSignature.CreateInstance(Normalize(signature.ReturnType), signature.GenericParameterCount, signature.ParameterTypes.Select(Normalize)) :
+            MethodSignature.CreateStatic(Normalize(signature.ReturnType), signature.GenericParameterCount, signature.ParameterTypes.Select(Normalize));
+    }
+
+    internal static MemberReference? FindExistingMethodReference(ModuleDefinition module, string name,
+        ITypeDefOrRef declaringType, MethodSignature vmSignature, GenericContext context)
+    {
+        var matches = module.GetImportedMemberReferences().Where(reference => reference.Name == name &&
+            SignatureComparer.Default.Equals(reference.DeclaringType, declaringType) &&
+            reference.Signature is MethodSignature signature &&
+            signature.GenericParameterCount == (context.Method?.TypeArguments.Count ?? 0) &&
+            SignatureComparer.Default.Equals(signature.InstantiateGenericTypes(context), vmSignature)).ToArray();
+        // Ambiguous metadata overloads are never reconstructed by choosing one.
+        if (matches.Length == 0 || matches.Skip(1).Any(reference =>
+                !SignatureComparer.Default.Equals(reference.Signature, matches[0].Signature)))
+            return null;
+        return matches[0];
+    }
     
+    private ITypeDefOrRef? OpenGenericOwner(ITypeDefOrRef? type) => OpenGenericOwner(type, Ctx.Module);
+
+    internal static ITypeDefOrRef? OpenGenericOwner(ITypeDefOrRef? type, ModuleDefinition module)
+    {
+        if (type?.ToTypeSignature() is GenericInstanceTypeSignature { TypeArguments.Count: 0 } empty &&
+            empty.GenericType.Resolve() is { GenericParameters.Count: > 0 })
+            type = empty.GenericType;
+        // Reflection can serialize an open generic owner without repeating its
+        // type parameters. A MemberRef still needs the explicit !n TypeSpec.
+        if (type is not TypeSpecification && type?.Resolve() is { GenericParameters.Count: > 0 } definition)
+            return new GenericInstanceTypeSignature(type, definition.IsValueType,
+                Enumerable.Range(0, definition.GenericParameters.Count).Select(index =>
+                    (TypeSignature)new GenericParameterSignature(module, GenericParameterType.Type, index)).ToArray()).ToTypeDefOrRef();
+        return type;
+    }
+
+    private IMethodDescriptor OpenGenericMethodOwner(IMethodDescriptor method)
+    {
+        if (method is MethodSpecification specification)
+            return new MethodSpecification((IMethodDefOrRef)OpenGenericMethodOwner(specification.Method!), specification.Signature!);
+        if (method.DeclaringType is ITypeDefOrRef owner && OpenGenericOwner(owner) is { } open && !ReferenceEquals(owner, open))
+            return open.CreateMemberReference(method.Name, method.Signature!);
+        return method;
+    }
+
     public IMethodDescriptor? ResolveMethod(int position)
     {
         if (Cache.TryGetValue(position, out var result))
@@ -277,6 +411,9 @@ internal class Resolver
         if (inlineOperand.IsToken)
         {
             var lookup = Ctx.Module.LookupMember<IMethodDescriptor>(inlineOperand.Token);
+            if (lookup is not MethodSpecification && lookup?.DeclaringType is ITypeDefOrRef owner &&
+                OpenGenericOwner(owner) is { } open && !ReferenceEquals(owner, open))
+                lookup = open.CreateMemberReference(lookup.Name, lookup.Signature!);
             Cache.Add(position, lookup);
             return lookup;
         }
@@ -287,7 +424,7 @@ internal class Resolver
         if (inlineOperand.Data is not VMMethodData data)
             throw new Exception("VM inline operand expected to have method data!");
 
-        var declaringTypeDefOrRef = ResolveType(data.DeclaringType.Position);
+        var declaringTypeDefOrRef = OpenGenericOwner(ResolveType(data.DeclaringType.Position));
         if (declaringTypeDefOrRef == null)
         {
             Ctx.Console.Error($"Failed to resolve declaring type on vm method {data.Name}!");
@@ -331,13 +468,14 @@ internal class Resolver
         if (inlineOperand.IsToken)
         {
             var member = Ctx.Module.LookupMember(inlineOperand.Token);
+            if (member is IMethodDescriptor method) member = (IMetadataMember)OpenGenericMethodOwner(method);
 
             Cache.Add(position, member);
             return member switch
             {
                 ITypeDescriptor typeDesc => typeDesc.ToTypeSignature(),
                 IFieldDescriptor fieldDesc => fieldDesc,
-                IMethodDescriptor methodDesc => methodDesc,
+                IMethodDescriptor methodDesc => OpenGenericMethodOwner(methodDesc),
                 _ => throw new ArgumentOutOfRangeException(nameof(member), member.GetType().FullName, "Member not a type, field, or method definition.")
             };
         }
@@ -373,6 +511,7 @@ internal class Resolver
         if (inlineOperand.IsToken)
         {
             var lookup = Ctx.Module.LookupMember<IMethodDescriptor>(inlineOperand.Token);
+            if (lookup != null) lookup = OpenGenericMethodOwner(lookup);
             Cache.Add(position, lookup);
             return lookup;
         }
@@ -412,7 +551,7 @@ internal class Resolver
         // eaz just includes the types needed in the data anyway
         // but log it just in case
         if (useConstrainedType)
-            Ctx.Console.Warning("Constrained type EazCall detected");
+                Ctx.Console.Info("Constrained type EazCall detected");
 
         var declaringTypeDefOrRef = ResolveType(methodInfo.VMDeclaringType);
         if (declaringTypeDefOrRef is null)

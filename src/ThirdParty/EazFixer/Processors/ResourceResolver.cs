@@ -1,7 +1,6 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using dnlib.DotNet;
@@ -11,99 +10,100 @@ namespace EazFixer.Processors
 {
     internal class ResourceResolver : ProcessorBase
     {
-        public List<Assembly> ResourceAssemblies;
+        public List<Assembly> ResourceAssemblies = new List<Assembly>();
         private TypeDef _resourceResolver;
         private MethodDef _initMethod;
 
         protected override void InitializeInternal()
         {
-            //find all "Resources" classes, and store them for later use
             if (!Flags.ResResolverTok.IsNull)
-                _resourceResolver = Ctx.Module.ResolveToken(Flags.ResResolverTok) as TypeDef
-                                    ?? throw new Exception("ResourceResolver token set but token not found");
+                _resourceResolver = Ctx.Module.ResolveToken(Flags.ResResolverTok) as TypeDef ?? throw new Exception("ResourceResolver token set but token not found");
             else
-                _resourceResolver = Ctx.Module.Types.SingleOrDefault(CanBeResourceResolver)
-                                    ?? throw new Exception("Could not find resolver type");
-
+                _resourceResolver = Ctx.Module.GetTypes().SingleOrDefault(CanBeResourceResolver) ?? throw new ProtectionNotFoundException("No resource resolver event registration found");
             if (!Flags.ResInitTok.IsNull)
-                _initMethod = Ctx.Module.ResolveToken(Flags.ResInitTok) as MethodDef
-                              ?? throw new Exception("InitMethod token set but method not found");
+                _initMethod = Ctx.Module.ResolveToken(Flags.ResInitTok) as MethodDef ?? throw new Exception("InitMethod token set but method not found");
             else
-                _initMethod = _resourceResolver.Methods.SingleOrDefault(CanBeInitMethod)
-                              ?? throw new Exception("Could not find init method");
+                _initMethod = _resourceResolver.Methods.SingleOrDefault(CanBeInitMethod) ?? throw new Exception("Could not find unambiguous init method");
         }
 
         protected override void ProcessInternal()
         {
-            //initialize all the resources
-            var mi = Utils.FindMethod(Ctx.Assembly, _initMethod, new Type[0]) ?? throw new Exception("Could not find init method through reflection");
-            mi.Invoke(null, new object[0]);
-
-            //get the dictionary we just initialized
-            FieldInfo dictionaryField = mi.DeclaringType.GetFields(BindingFlags.Static | BindingFlags.NonPublic).Single(a => a.FieldType.Name.StartsWith("Dictionary"));
-            object dictionaryValue = dictionaryField.GetValue(null);
-            if (dictionaryValue.GetType().Name != "Dictionary`2") Debug.Fail("not a dictionary");
-            var dictionary = (IDictionary)dictionaryValue;
-
-            //extract the assemblies through reflection
-            ResourceAssemblies = new List<Assembly>();
-            foreach (object obj in dictionary.Values) {
-                var methods = obj.GetType().GetMethods(BindingFlags.NonPublic | BindingFlags.Instance).ToList();
-                var assembly = (Assembly) methods.Single(a => !a.IsConstructor && a.ReturnParameter?.ParameterType == typeof(Assembly)).Invoke(obj, new object[0]);
-                if (!ResourceAssemblies.Contains(assembly))
-                    ResourceAssemblies.Add(assembly);
-            }
-
-            //extract the resources and add them to the module
-            foreach (var assembly in ResourceAssemblies) {
-                foreach (Module module in assembly.Modules) {
-                    Debug.WriteLine("[D] Loading module for ResourceResolver...");
-                    var md = ModuleDefMD.Load(module);
-
-                    foreach (Resource resource in md.Resources)
-                        Ctx.Module.Resources.Add(resource);
+            var init = Utils.FindMethod(Ctx.Assembly, _initMethod, Type.EmptyTypes) ?? throw new Exception("Could not find init method through reflection");
+            init.Invoke(null, null);
+            var dictionaries = init.DeclaringType.GetFields(BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)
+                .Where(field => typeof(IDictionary).IsAssignableFrom(field.FieldType))
+                .Select(field => field.GetValue(null) as IDictionary).Where(dictionary => dictionary != null).ToArray();
+            if (dictionaries.Length == 0) throw new Exception("No initialized resource dictionary found");
+            int entries = 0, extracted = 0, duplicates = 0;
+            foreach (var dictionary in dictionaries)
+                foreach (var entry in dictionary.Values)
+                {
+                    entries++;
+                    try
+                    {
+                        var assembly = entry as Assembly;
+                        if (assembly == null && entry != null)
+                        {
+                            var getters = entry.GetType().GetMethods(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance)
+                                .Where(method => !method.IsConstructor && method.ReturnType == typeof(Assembly) && method.GetParameters().Length == 0).ToArray();
+                            if (getters.Length != 1) throw new Exception("Resource entry has no unambiguous assembly getter");
+                            assembly = getters[0].Invoke(entry, null) as Assembly;
+                        }
+                        if (assembly == null) throw new Exception("Resource entry returned no assembly");
+                        if (!ResourceAssemblies.Contains(assembly)) ResourceAssemblies.Add(assembly);
+                    }
+                    catch (Exception error) { Warn("Resource assembly entry " + entries + ": " + error.GetBaseException().Message); }
                 }
+            foreach (var assembly in ResourceAssemblies)
+                foreach (var module in assembly.GetModules())
+                    try
+                    {
+                        using (var recovered = ModuleDefMD.Load(module))
+                            foreach (var resource in recovered.Resources)
+                            {
+                                if (TryAddRecoveredResource(Ctx.Module, resource, out var error)) extracted++;
+                                else if (error == null) duplicates++;
+                                else Warn(error);
+                            }
+                    }
+                    catch (Exception error) { Warn("Resource module " + module.Name + ": " + error.GetBaseException().Message); }
+            Summary = "Read " + entries + " resource manifest entries; loaded " + ResourceAssemblies.Count + " assembly(s); added " + extracted +
+                " resource(s), ignored " + duplicates + " identical duplicate(s). Resolver types preserved.";
+        }
+
+        internal static bool TryAddRecoveredResource(ModuleDef module, Resource resource, out string error)
+        {
+            error = null;
+            if (!(resource is EmbeddedResource embedded))
+            { error = "Unsupported linked resource retained: " + resource.Name; return false; }
+            var bytes = embedded.CreateReader().ToArray();
+            var existing = module.Resources.FirstOrDefault(item => item.Name == resource.Name);
+            if (existing != null)
+            {
+                if (existing is EmbeddedResource old && old.CreateReader().ToArray().SequenceEqual(bytes)) return false;
+                error = "Conflicting resource name retained without overwrite: " + resource.Name; return false;
             }
+            module.Resources.Add(new EmbeddedResource(resource.Name, bytes, resource.Attributes));
+            return true;
         }
 
         protected override void CleanupInternal()
         {
-            //remove the call to the method that sets OnResourceResolve
-            var modType = Ctx.Module.GlobalType ?? throw new Exception("Could not find <Module>");
-            var instructions = modType.FindStaticConstructor()?.Body?.Instructions ?? throw new Exception("Missing <Module> .cctor");
-            foreach (Instruction instr in instructions) {
-                if (instr.OpCode.Code != Code.Call) continue;
-                if (!(instr.Operand is MethodDef md)) continue;
-
-                if (md.DeclaringType == _resourceResolver)
-                    instr.OpCode = OpCodes.Nop;
-            }
-
+            // Failed/unknown entries still need the runtime resolver.
+            if (WarningCount > 0) return;
+            var instructions = Ctx.Module.GlobalType?.FindStaticConstructor()?.Body?.Instructions;
+            if (instructions != null)
+                foreach (var instruction in instructions)
+                    if (instruction.OpCode.Code == Code.Call && instruction.Operand is MethodDef method && method.DeclaringType == _resourceResolver)
+                    { instruction.OpCode = OpCodes.Nop; instruction.Operand = null; }
             Ctx.Module.Types.Remove(_resourceResolver);
         }
 
-        private static bool CanBeResourceResolver(TypeDef t)
-        {
-            if (t.Fields.Count != 2 && t.Fields.Count != 3) return false;
-            if (t.NestedTypes.Count != 1) return false;
+        private static bool CanBeResourceResolver(TypeDef type) => type.Methods.Where(method => method.HasBody)
+            .Any(method => method.Body.Instructions.Any(instruction => (instruction.OpCode.Code == Code.Callvirt || instruction.OpCode.Code == Code.Call)
+                && instruction.Operand is IMethod called && called.Name == "add_ResourceResolve"));
 
-            foreach (MethodDef m in t.Methods.Where(a => a.HasBody && a.Body.HasInstructions)) {
-                //adds ResourceResolver
-                bool addsResolver = m.Body.Instructions.Any(i => i.OpCode.Code == Code.Callvirt && i.Operand is MemberRef mr && mr.Name == "add_ResourceResolve");
-                if (addsResolver) return true;
-            }
-
-            return false;
-        }
-
-        private static bool CanBeInitMethod(MethodDef a)
-        {
-            if (!a.HasBody || !a.Body.HasInstructions) return false;
-
-            if (a.MethodSig.ToString() != "System.Void ()") return false;
-            
-            //might get outdated soon, watch this
-            return a.Body.Instructions.First().OpCode.Code == Code.Volatile;
-        }
+        private static bool CanBeInitMethod(MethodDef method) => method.IsStatic && method.HasBody && method.MethodSig.Params.Count == 0 &&
+            method.MethodSig.RetType.ElementType == ElementType.Void && method.Body.Instructions.Any(instruction => instruction.OpCode.Code == Code.Volatile);
     }
 }

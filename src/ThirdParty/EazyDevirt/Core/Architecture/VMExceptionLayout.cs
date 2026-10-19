@@ -78,7 +78,7 @@ internal sealed class VMExceptionLayout
         }
         if (layout.Fields.Count != 6 || layout.Fields.Distinct().Count() != 6 || layout.Kinds.Count != 4)
             throw new NotSupportedException("Incomplete VM exception layout: " + string.Join(",", layout.Fields) + "; " + string.Join(",", layout.Kinds.Select(p => p.Key + "=" + p.Value)));
-        Console.WriteLine("VM exception layout: " + string.Join(", ", layout.Fields) + "; kinds: " +
+        EazyDevirt.Logging.ConsoleLogger.Detail("VM exception layout: " + string.Join(", ", layout.Fields) + "; kinds: " +
             string.Join(", ", layout.Kinds.Select(p => p.Key + "=" + p.Value)));
         return layout;
     }

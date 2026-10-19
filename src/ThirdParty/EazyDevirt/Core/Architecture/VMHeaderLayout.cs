@@ -51,7 +51,7 @@ internal sealed class VMHeaderLayout
         if(layout.Fields.Count!=6 || layout.Fields.Count(f=>f==VMHeaderField.Type)!=2 ||
             !layout.Fields.Contains(VMHeaderField.Locals) || !layout.Fields.Contains(VMHeaderField.Parameters))
             throw new NotSupportedException("VM header layout has unsupported fields.");
-        Console.WriteLine("VM header layout: "+string.Join(", ",layout.Fields));
+        EazyDevirt.Logging.ConsoleLogger.Detail("VM header layout: "+string.Join(", ",layout.Fields));
         return layout;
     }
 }

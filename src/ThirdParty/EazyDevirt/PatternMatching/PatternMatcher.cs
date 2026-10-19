@@ -190,7 +190,7 @@ internal class PatternMatcher
                 current.Add(instructions[j]);
             }
 
-            if (current.Count == pat.Count && pattern.Verify(instructions, index + i))
+            if (current.Count == pat.Count && pattern.Verify(instructions, i))
                 matchingInstructions.Add(current.ToArray());
         }
 
@@ -225,7 +225,7 @@ internal class PatternMatcher
                 current.Add(instructions[j]);
             }
 
-            if (current.Count == pat.Count && pattern.Verify(method, index + i))
+            if (current.Count == pat.Count && pattern.Verify(method, i))
                 matchingInstructions.Add(current.ToArray());
         }
 
@@ -260,7 +260,7 @@ internal class PatternMatcher
                 current.Add(instructions[j]);
             }
 
-            if (current.Count == pat.Count && pattern.Verify(vmOpCode, index + i))
+            if (current.Count == pat.Count && pattern.Verify(vmOpCode, i))
                 matchingInstructions.Add(current.ToArray());
         }
 

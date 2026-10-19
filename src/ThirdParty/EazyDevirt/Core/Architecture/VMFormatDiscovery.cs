@@ -27,7 +27,7 @@ internal static class VMFormatDiscovery
                 if(ins[i+1].Operand is IMethodDescriptor helper && helper.Signature?.ReturnType.FullName=="System.Reflection.BindingFlags") {
                     var generic=masks.Where(p=>p.Key!=getter).Select(p=>p.Value).Distinct().ToArray();
                     if(generic.Length!=1)throw new NotSupportedException("Ambiguous VM generic flag.");
-                    Console.WriteLine($"VM method flags: static={mask}, generic={generic[0]}");return(mask,generic[0]);
+                    EazyDevirt.Logging.ConsoleLogger.Detail($"VM method flags: static={mask}, generic={generic[0]}");return(mask,generic[0]);
                 }
             }
         }
@@ -67,7 +67,7 @@ internal static class VMFormatDiscovery
                     CilCode.Brfalse or CilCode.Brfalse_S when readsToken(fall) => (byte)1,
                     _ => null
                 };
-                if(found.HasValue) {Console.WriteLine("VM token tag: "+found.Value);return found.Value;}
+                if(found.HasValue) {EazyDevirt.Logging.ConsoleLogger.Detail("VM token tag: "+found.Value);return found.Value;}
             }
         }
         throw new NotSupportedException("Cannot derive VM metadata token discriminator.");
@@ -100,7 +100,7 @@ internal static class VMFormatDiscovery
                 _ => throw new NotSupportedException("Unsupported VM wire primitive: " + primitive)
             };
         }
-        Console.WriteLine("VM operand layout: " + string.Join(", ", result.Select(p => p.Key + "=" + p.Value)));
+        EazyDevirt.Logging.ConsoleLogger.Detail("VM operand layout: " + string.Join(", ", result.Select(p => p.Key + "=" + p.Value)));
         return result;
     }
 
@@ -130,7 +130,7 @@ internal static class VMFormatDiscovery
             }
             if (result.Count == 5 && result.Values.Distinct().Count() == 5)
             {
-                Console.WriteLine("VM inline layout: " + string.Join(", ", result.Select(p => p.Key + "=" + p.Value)));
+                EazyDevirt.Logging.ConsoleLogger.Detail("VM inline layout: " + string.Join(", ", result.Select(p => p.Key + "=" + p.Value)));
                 return result;
             }
         }

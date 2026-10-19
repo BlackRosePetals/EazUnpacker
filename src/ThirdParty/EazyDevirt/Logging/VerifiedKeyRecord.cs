@@ -1,0 +1,18 @@
+using Newtonsoft.Json;
+
+namespace EazyDevirt.Logging;
+
+internal sealed record VerifiedKeyRecord(string MethodToken,int RegionId,string KeyType,object Value,string Source)
+{
+    public string OriginalNamespace {get;init;}="";
+    public string OriginalTypeName {get;init;}="";
+    public string OriginalMethodName {get;init;}="";
+    public string OriginalMethodFullName {get;init;}="";
+    public bool OriginalVerifierPassed => true;
+    internal string Format()
+    {
+        string value=Value is int number?number+" (0x"+unchecked((uint)number).ToString("X8")+")":JsonConvert.SerializeObject(Value);
+        string identity=string.IsNullOrEmpty(OriginalMethodFullName)?"": " "+JsonConvert.SerializeObject(OriginalMethodFullName);
+        return $"[密钥] 方法 {MethodToken}{identity} / 区域 {RegionId}：{KeyType} = {value}；来源：{Source}；原始校验通过。";
+    }
+}

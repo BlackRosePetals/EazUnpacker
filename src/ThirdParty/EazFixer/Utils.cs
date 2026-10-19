@@ -23,6 +23,19 @@ namespace EazFixer
 
         public static MethodInfo FindMethod(Assembly ass, MethodDef meth, Type[] args)
         {
+            // Tokens avoid ambiguous obfuscated names and nested-type lookup issues.
+            if (meth.MDToken.Rid != 0)
+                foreach (var module in ass.GetModules())
+                {
+                    if (module.ModuleVersionId != meth.Module.Mvid) continue;
+                    try
+                    {
+                        var resolved = module.ResolveMethod(unchecked((int)meth.MDToken.Raw)) as MethodInfo;
+                        if (resolved != null) return resolved;
+                    }
+                    catch (ArgumentException) { }
+                    catch (BadImageFormatException) { }
+                }
             var flags = BindingFlags.Default;
             flags |= meth.IsPublic ? BindingFlags.Public : BindingFlags.NonPublic;
             flags |= meth.IsStatic ? BindingFlags.Static : BindingFlags.Instance;

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -13,10 +13,12 @@ namespace EazFixer.Processors
     internal class AssemblyResolver : ProcessorBase
     {
         private TypeDef _assemblyResolver;
-        private MethodDef _moveNext;
+        private List<MethodDef> _manifestMethods;
+        private readonly HashSet<string> _extractedResources = new HashSet<string>(StringComparer.Ordinal);
         private List<EmbeddedAssemblyInfo> _assemblies;
         private MethodInfo _decrypter;
         private MethodInfo _decompressor;
+        public int ExtractedCount { get; private set; }
 
         protected override void InitializeInternal()
         {
@@ -26,22 +28,18 @@ namespace EazFixer.Processors
                 _assemblyResolver = Ctx.Module.ResolveToken(Flags.AsmResTypeTok) as TypeDef
                                     ?? throw new Exception("AssemblyResolver token set but type not found");
             else
-                _assemblyResolver = Ctx.Module.Types.SingleOrDefault(CanBeAssemblyResolver)
-                                    ?? throw new Exception("Could not find resolver type");
+                _assemblyResolver = Ctx.Module.GetTypes().SingleOrDefault(CanBeAssemblyResolver)
+                                    ?? throw new ProtectionNotFoundException("No assembly resolver event registration found");
 
             if (!Flags.AsmResMoveNextTok.IsNull)
-                _moveNext = Ctx.Module.ResolveToken(Flags.AsmResMoveNextTok) as MethodDef
-                            ?? throw new Exception("MoveNext token set but type not found");
+                _manifestMethods = new List<MethodDef> { Ctx.Module.ResolveToken(Flags.AsmResMoveNextTok) as MethodDef
+                    ?? throw new Exception("MoveNext token set but method not found") };
             else
             {
-                var extractionApi = _assemblyResolver.NestedTypes.SingleOrDefault(CanBeExtractionApi)
-                                    ?? throw new Exception("Could not find assembly extraction helper");
-                var enumerable = extractionApi.NestedTypes.SingleOrDefault(CanBeEnumerable)
-                                 ?? throw new Exception("Could not find EnumerateEmbeddedAssemblies iterator");
-                _moveNext = enumerable.Methods.SingleOrDefault(CanBeMoveNext)
-                            ?? throw new Exception("Could not find EnumerateEmbeddedAssemblies's MoveNext");  
+                _manifestMethods = Utils.GetMethodsRecursive(_assemblyResolver).Where(method => method.HasBody && CanBeMoveNext(method)).ToList();
+                if (_manifestMethods.Count == 0)
+                    _manifestMethods = Utils.GetMethodsRecursive(_assemblyResolver).Where(method => method.HasBody).ToList();
             }
-
             //find the decryption methods
 
             MethodDef dec1;
@@ -49,11 +47,9 @@ namespace EazFixer.Processors
                 dec1 = Ctx.Module.ResolveToken(Flags.AsmResDecryptTok) as MethodDef
                        ?? throw new Exception("Decrypter token set but method not found");
             else
-                dec1 = _assemblyResolver.Methods.SingleOrDefault(CanBeDecryptionMethod)
-                       ?? throw new Exception("Could not find decryption method");
+                dec1 = _assemblyResolver.Methods.SingleOrDefault(CanBeDecryptionMethod);
 
-            _decrypter = Utils.FindMethod(Ctx.Assembly, dec1, new[] { typeof(byte[]) })
-                         ?? throw new Exception("Couldn't find decrypter through reflection");
+            if (dec1 != null) _decrypter = Utils.FindMethod(Ctx.Assembly, dec1, new[] { typeof(byte[]) });
 
             MethodDef dec2;
             if (!Flags.AsmResDecompressTok.IsNull)
@@ -70,66 +66,99 @@ namespace EazFixer.Processors
 
         protected override void ProcessInternal()
         {
-            //get path to write to
-            var path = Path.GetDirectoryName(Ctx.Assembly.Location);
-
-            //get assemblies
-            //this happens here because we need string to be decrypted
-            // Newer samples can store the manifest directly as a literal.
-            var str = _moveNext.Body.Instructions.SingleOrDefault(a => a.OpCode.Code == Code.Ldstr)?.Operand as string
-                      ?? throw new Exception("Could not find assembly list");
-            
-            // AssemblyNames that start with `#A,A,` seem to be copies but with a version attached
-            _assemblies = EnumerateEmbeddedAssemblies(str).Where(a => !a.Fullname.StartsWith("#A,A,")).ToList();
-
-            //get the resource resolver and figure out which assemblies we shouldn't extract
-            var res = Ctx.Get<ResourceResolver>();
-            IEnumerable<EmbeddedAssemblyInfo> asmEnumerator = res.Initialized
-                ? _assemblies.Where(a => res.ResourceAssemblies.All(b => !string.Equals(b.GetName().Name, new AssemblyName(a.Fullname).Name, StringComparison.CurrentCultureIgnoreCase)))
-                : _assemblies;
-
-            foreach (var assembly in asmEnumerator)
+            var path = Path.GetDirectoryName(Path.GetFullPath(Flags.OutFile));
+            Directory.CreateDirectory(path);
+            var manifests = new List<EmbeddedAssemblyInfo>();
+            foreach (var method in _manifestMethods)
+                foreach (var literal in method.Body.Instructions.Where(instruction => instruction.OpCode.Code == Code.Ldstr))
+                    if (TryParseManifest(literal.Operand as string, out var entries)) manifests.AddRange(entries);
+            if (manifests.Count == 0) throw new Exception("Could not find a valid embedded assembly manifest");
+            manifests = manifests.GroupBy(item => item.Fullname + "\n" + item.ResourceName + "\n" + item.Filename).Select(group => group.First()).ToList();
+            int aliases = manifests.Count(item => item.Fullname.StartsWith("#A,A,", StringComparison.Ordinal));
+            _assemblies = manifests.Where(item => !item.Fullname.StartsWith("#A,A,", StringComparison.Ordinal)).ToList();
+            var resourceResolver = Ctx.Processors.OfType<ResourceResolver>().FirstOrDefault();
+            var resourceNames = new HashSet<string>((resourceResolver?.ResourceAssemblies ?? new List<Assembly>())
+                .Select(assembly => assembly.GetName().Name), StringComparer.OrdinalIgnoreCase);
+            int skippedResources = 0, extracted = 0;
+            var report = new List<string>();
+            foreach (var assembly in _assemblies)
             {
-                //get the resource containing the assembly
-                string resName = assembly.ResourceName;
-                var stream = Ctx.Assembly.GetManifestResourceStream(resName);    //not sure if reflection is the best way
-
-                var read = 0;
-                byte[] buffer = new byte[stream.Length];
-                while (read < buffer.Length)
-                    read += stream.Read(buffer, read, (int)stream.Length);
-
-                //if the assembly is encrypted: decrypt it
-                if (assembly.Encrypted) {
-                    if (_decrypter.Invoke(null, new object[] {buffer}) is byte[] decrypted)
-                        buffer = decrypted;
-                }
-                //if the assembly is prefixed: remove it
-                if (assembly.Compressed) {
-                    if (_decompressor == null) throw new Exception("Assembly is compressed, but couldn't find decompressor method");
-                    var resp = _decompressor.Invoke(null, new object[] {buffer});
-                    if (resp is byte[] b)
-                        buffer = b;
-                }
-
-                using(var module=ModuleDefMD.Load(buffer))
+                try
                 {
-                    var expected = new AssemblyName(assembly.Fullname);
-                    var actual = new AssemblyName(module.Assembly.FullName);
-                    if(!string.Equals(actual.Name, expected.Name, StringComparison.OrdinalIgnoreCase)
-                        || expected.Version != null && actual.Version != expected.Version
-                        || !string.Equals(actual.CultureName ?? "", expected.CultureName ?? "", StringComparison.OrdinalIgnoreCase)
-                        || !(actual.GetPublicKeyToken() ?? new byte[0]).SequenceEqual(expected.GetPublicKeyToken() ?? new byte[0]))
-                        throw new InvalidDataException("Extracted assembly identity does not match its manifest: expected "+assembly.Fullname+"; actual "+module.Assembly.FullName);
+                    if (resourceNames.Contains(new AssemblyName(assembly.Fullname).Name)) { skippedResources++; continue; }
+                    byte[] buffer;
+                    using (var stream = Ctx.Assembly.GetManifestResourceStream(assembly.ResourceName))
+                    {
+                        if (stream == null) throw new InvalidDataException("Embedded resource not found: " + assembly.ResourceName);
+                        using (var data = new MemoryStream()) { stream.CopyTo(data); buffer = data.ToArray(); }
+                    }
+                    if (assembly.Encrypted)
+                    {
+                        if (_decrypter == null) throw new Exception("No unambiguous assembly decrypter found");
+                        buffer = _decrypter.Invoke(null, new object[] { buffer }) as byte[] ?? throw new InvalidDataException("Assembly decrypter returned no bytes");
+                    }
+                    if (assembly.Compressed)
+                    {
+                        if (_decompressor == null) throw new Exception("No unambiguous assembly decompressor found");
+                        buffer = _decompressor.Invoke(null, new object[] { buffer }) as byte[] ?? throw new InvalidDataException("Assembly decompressor returned no bytes");
+                    }
+                    using (var module = ModuleDefMD.Load(buffer))
+                    {
+                        if (module.Assembly == null) throw new InvalidDataException("Embedded image is not an assembly");
+                        var expected = new AssemblyName(assembly.Fullname);
+                        var actual = new AssemblyName(module.Assembly.FullName);
+                        if (!string.Equals(actual.Name, expected.Name, StringComparison.OrdinalIgnoreCase)
+                            || expected.Version != null && actual.Version != expected.Version
+                            || !string.Equals(actual.CultureName ?? "", expected.CultureName ?? "", StringComparison.OrdinalIgnoreCase)
+                            || !(actual.GetPublicKeyToken() ?? new byte[0]).SequenceEqual(expected.GetPublicKeyToken() ?? new byte[0]))
+                            throw new InvalidDataException("Extracted assembly identity mismatch: expected " + assembly.Fullname + "; actual " + module.Assembly.FullName);
+                    }
+                    var filename = Path.GetFileName(assembly.Filename);
+                    if (filename != assembly.Filename || string.IsNullOrWhiteSpace(filename) || filename == "." || filename == ".." || filename.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+                        throw new InvalidDataException("Embedded assembly filename is not a simple filename");
+                    var destination = Path.Combine(path, filename);
+                    // An embedded alias must never overwrite the main recovered assembly.
+                    if (string.Equals(Path.GetFullPath(destination), Path.GetFullPath(Flags.OutFile), StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidDataException("Embedded assembly destination collides with the recovered output");
+                    File.WriteAllBytes(destination, buffer);
+                    _extractedResources.Add(assembly.ResourceName); extracted++; ExtractedCount++;
+                    report.Add("Extracted: " + assembly.Fullname + " -> " + destination);
                 }
-                string filename=Path.GetFileName(assembly.Filename);
-                if(filename!=assembly.Filename)throw new InvalidDataException("Embedded assembly filename must be a simple filename.");
-                File.WriteAllBytes(Path.Combine(path, filename), buffer);
+                catch (Exception error)
+                {
+                    var message = assembly.Fullname + ": " + error.GetBaseException().Message;
+                    Warn(message); report.Add("Failed: " + message);
+                }
             }
+            Summary = "ManifestItems=" + manifests.Count + "; AliasesSkipped=" + aliases + "; ResourceAssembliesSkipped=" + skippedResources +
+                "; Extracted=" + extracted + "; Failures=" + WarningCount + ". Runtime resolver dependencies preserved.";
+            report.Insert(0, Summary);
+            File.WriteAllLines(Path.Combine(path, "embedded-assemblies.txt"), report, Encoding.UTF8);
         }
 
+        internal static bool TryParseManifest(string text, out List<EmbeddedAssemblyInfo> entries)
+        {
+            entries = null;
+            if (string.IsNullOrEmpty(text) || text.IndexOf(',') < 0) return false;
+            try
+            {
+                var parsed = EnumerateEmbeddedAssemblies(text).ToList();
+                if (parsed.Count == 0) return false;
+                foreach (var item in parsed)
+                {
+                    if (string.IsNullOrEmpty(item.ResourceName) || string.IsNullOrEmpty(item.Filename)) return false;
+                    if (!item.Fullname.StartsWith("#A,A,", StringComparison.Ordinal))
+                        if (string.IsNullOrWhiteSpace(new AssemblyName(item.Fullname).Name)) return false;
+                }
+                entries = parsed; return true;
+            }
+            catch (FormatException) { return false; }
+            catch (ArgumentException) { return false; }
+            catch (FileLoadException) { return false; }
+        }
         protected override void CleanupInternal()
         {
+            if (WarningCount > 0) return;
             //remove the call to the method that sets OnAssemblyResolve
             var modType = Ctx.Module.GlobalType ?? throw new Exception("Could not find <Module>");
             var instructions = modType.FindStaticConstructor()?.Body?.Instructions ?? throw new Exception("Missing <Module> .cctor");
@@ -147,19 +176,20 @@ namespace EazFixer.Processors
                 Ctx.Module.Types.Remove(_assemblyResolver);
 
             //remove resources
-            foreach (var assembly in _assemblies)
-                Ctx.Module.Resources.Remove(Ctx.Module.Resources.SingleOrDefault(a => a.Name == assembly.ResourceName)
+            foreach (var resource in _extractedResources)
+                Ctx.Module.Resources.Remove(Ctx.Module.Resources.SingleOrDefault(a => a.Name == resource)
                                             ?? throw new Exception("Resource name not unique (or present)"));
         }
 
         private bool CanBeAssemblyResolver(TypeDef t)
         {
-            if (t.Methods.Count(a => a.IsPinvokeImpl) != 1) return false;   //MoveFileEx
-            if (t.NestedTypes.Count < 4) return false; //AssemblyCache, AssemblyRepresentation, ExtractionApi, RNG
-
+            // Registering AssemblyResolve is not sufficient evidence of an Eaz
+            // embedded-assembly runtime (ordinary applications do so too).
+            // Eaz extraction APIs contain an enumerable MoveNext manifest reader.
+            if(!Utils.GetMethodsRecursive(t).Any(CanBeMoveNext))return false;
             foreach (MethodDef m in t.Methods.Where(a => a.HasBody && a.Body.HasInstructions)) {
                 //adds AssemblyResolver
-                bool addsResolver = m.Body.Instructions.Any(i => i.OpCode.Code == Code.Callvirt && i.Operand is MemberRef mr && mr.Name == "add_AssemblyResolve");
+                bool addsResolver = m.Body.Instructions.Any(i => (i.OpCode.Code == Code.Callvirt || i.OpCode.Code == Code.Call) && i.Operand is IMethod mr && mr.Name == "add_AssemblyResolve");
                 if (addsResolver)
                     return true;
             }

@@ -1,5 +1,6 @@
 using AsmResolver.DotNet;
 using AsmResolver.DotNet.Serialized;
+using AsmResolver.DotNet.Code.Cil;
 using AsmResolver.PE.DotNet.Cil;
 using EazyDevirt.Core.Abstractions;
 using EazyDevirt.Core.Architecture;
@@ -118,49 +119,16 @@ internal sealed class MethodDiscovery : StageBase
             if (cilMethodBody is null)
                 continue;
 
-            var instructions = cilMethodBody.Instructions;
-            var index = -1;
-
-            for (var i = 0; i < instructions.Count; i++)
+            foreach (var callSite in FindCallSites(method, Ctx.VMResourceGetterMdToken))
             {
-                var ins = instructions[i];
-
-                if (ins.OpCode.Code is not CilCode.Call ||
-                    ins.Operand is not SerializedMethodDefinition operand ||
-                    operand.MetadataToken != Ctx.VMResourceGetterMdToken)
-                    continue;
-
-                index = i;
-                break;
-            }
-
-            //[0] = {CilInstruction} IL_0000: call VM VMGetter::GetVMInstance()
-            //[1] = {CilInstruction} IL_0005: call System.IO.Stream VMGetter::GetVMResourceStream()                         // this is the one we want
-            //[2] = {CilInstruction} IL_000A: ldstr "5<^5Q+Z_VC"                                                            // this is the one we want
-            //[3] = {CilInstruction} IL_000F: ldnull
-            //[4] = {CilInstruction} IL_0010: call System.Object VM::ExecuteVMPosition(System.IO.Stream, System.String, System.Object[])
-            //[5] = {CilInstruction} IL_0015: unbox System.Int32
-            //[6] = {CilInstruction} IL_001A: ldobj System.Int32
-            //[7] = {CilInstruction} IL_001F: ret
-            
-            if (index == -1)
-                continue;
-
-            var executor = instructions.Skip(index + 1).Select((instruction, offset)=>(instruction, offset))
-                .FirstOrDefault(p=>p.instruction.Operand is IMethodDescriptor target && target.Signature?.ParameterTypes.Count>=3 &&
-                    target.Signature.ParameterTypes[0].FullName=="System.IO.Stream" && target.Signature.ParameterTypes[1].FullName=="System.String" &&
-                    target.Signature.ParameterTypes[2].FullName=="System.Object[]");
-            var encodedMethodKey = executor.instruction == null ? null : instructions.Skip(index + 1).Take(executor.offset)
-                .Where(i=>i.OpCode.Code==CilCode.Ldstr).Select(i=>i.Operand as string).LastOrDefault();
-            if(encodedMethodKey==null) {
-                Ctx.Console.Warning($"No encoded VM key before executor in {method.MetadataToken}");continue;
-            }
+            string encodedMethodKey = callSite.Key;
             if (Ctx.Options.VeryVerbose)
                 Ctx.Console.InfoStr("Virtualized method found", method.MetadataToken);
 
             var methodKey =  DecodeMethodKey(encodedMethodKey, Ctx.PositionCryptoKey);
             if(methodKey<0 || methodKey>=Ctx.VMStream.Length) {Ctx.Console.Warning("VM method position out of bounds: "+method.MetadataToken);continue;}
-            Ctx.VMMethods.Add(new VMMethod(method, encodedMethodKey, methodKey));
+            Ctx.VMMethods.Add(new VMMethod(method, encodedMethodKey, methodKey) { ExecutorInstruction = callSite.Executor });
+            }
         }
 
         if (Ctx.Options.Verbose)
@@ -169,6 +137,88 @@ internal sealed class MethodDiscovery : StageBase
         return true;
     }
 
+    internal static IEnumerable<(CilInstruction Executor, string Key)> FindCallSites(MethodDefinition method, AsmResolver.PE.DotNet.Metadata.Tables.MetadataToken getterToken)
+    {
+        var linear = FindLinearCallSites(method, getterToken).ToArray();
+        foreach (var call in linear) yield return call;
+        var body = method.CilMethodBody!;
+        var missing = body.Instructions.Select((instruction,index)=>(instruction,index)).Where(pair =>
+            !linear.Any(call => ReferenceEquals(call.Executor,pair.instruction)) &&
+            pair.instruction.OpCode.Code is CilCode.Call or CilCode.Callvirt &&
+            pair.instruction.Operand is IMethodDescriptor target && target.Signature?.ParameterTypes.Count >= 3 &&
+            target.Signature.ParameterTypes[0].FullName == "System.IO.Stream" && target.Signature.ParameterTypes[1].FullName == "System.String" &&
+            target.Signature.ParameterTypes.Last().FullName == "System.Object[]").ToArray();
+        if (missing.Length == 0) yield break;
+        body.Instructions.CalculateOffsets();
+        var indices = body.Instructions.Select((instruction,index)=>(instruction.Offset,index)).ToDictionary(p=>p.Offset,p=>p.index);
+        var predecessors = Enumerable.Range(0,body.Instructions.Count).Select(_=>new List<int>()).ToArray();
+        for (int i=0;i<body.Instructions.Count;i++)
+        {
+            var instruction=body.Instructions[i];
+            if(instruction.Operand is ICilLabel label && indices.TryGetValue(label.Offset,out int target)) predecessors[target].Add(i);
+            else if(instruction.Operand is IList<ICilLabel> table)
+                foreach(var item in table)if(indices.TryGetValue(item.Offset,out int destination))predecessors[destination].Add(i);
+            if(i+1<body.Instructions.Count && instruction.OpCode.FlowControl is not (CilFlowControl.Branch or CilFlowControl.Return or CilFlowControl.Throw))
+                predecessors[i+1].Add(i);
+        }
+        CilInstruction? Producer(int callIndex,int initialDepth)
+        {
+            var pending=new Stack<(int Index,int Depth)>();var visited=new HashSet<(int,int)>();CilInstruction? result=null;
+            foreach(int p in predecessors[callIndex])pending.Push((p,initialDepth));
+            while(pending.Count>0)
+            {
+                var state=pending.Pop();if(!visited.Add(state))continue;
+                if(visited.Count>20000 || state.Depth<0 || state.Depth>4096)return null;
+                var instruction=body.Instructions[state.Index];
+                if(instruction.OpCode.FlowControl is CilFlowControl.Return or CilFlowControl.Throw ||
+                    instruction.OpCode.Code is CilCode.Leave or CilCode.Leave_S or CilCode.Endfinally or CilCode.Endfilter)return null;
+                int depth;
+                if(instruction.OpCode.Code==CilCode.Dup)depth=state.Depth<2?0:state.Depth-1;
+                else
+                {
+                    int pushes=instruction.GetStackPushCount();
+                    if(state.Depth<pushes)
+                    {
+                        if(result!=null && !ReferenceEquals(result,instruction))return null;
+                        result=instruction;continue;
+                    }
+                    depth=state.Depth-pushes+instruction.GetStackPopCount(body);
+                }
+                if(predecessors[state.Index].Count==0)return null;
+                foreach(int p in predecessors[state.Index])pending.Push((p,depth));
+            }
+            return result;
+        }
+        foreach(var pair in missing)
+        {
+            int count=((IMethodDescriptor)pair.instruction.Operand!).Signature!.ParameterTypes.Count;
+            var key=Producer(pair.index,count-2);var stream=Producer(pair.index,count-1);
+            if(key?.OpCode.Code==CilCode.Ldstr && key.Operand is string value && stream?.OpCode.Code==CilCode.Call &&
+                stream.Operand is MethodDefinition getter && getter.MetadataToken==getterToken)
+                yield return (pair.instruction,value);
+        }
+    }
+
+    private static IEnumerable<(CilInstruction Executor, string Key)> FindLinearCallSites(MethodDefinition method, AsmResolver.PE.DotNet.Metadata.Tables.MetadataToken getterToken)
+    {
+        var instructions = method.CilMethodBody!.Instructions;
+        var indices = Enumerable.Range(0, instructions.Count).Where(index =>
+            instructions[index].OpCode.Code == CilCode.Call && instructions[index].Operand is MethodDefinition getter && getter.MetadataToken == getterToken).ToArray();
+        for (int n = 0; n < indices.Length; n++)
+        {
+            int index = indices[n]; int end = n + 1 < indices.Length ? indices[n + 1] : instructions.Count;
+            for (int at = index + 1; at < end; at++)
+            {
+                var executor = instructions[at];
+                if (executor.OpCode.Code is not (CilCode.Call or CilCode.Callvirt) || executor.Operand is not IMethodDescriptor target || target.Signature?.ParameterTypes.Count < 3 ||
+                    target.Signature == null || target.Signature.ParameterTypes[0].FullName != "System.IO.Stream" || target.Signature.ParameterTypes[1].FullName != "System.String" || target.Signature.ParameterTypes[2].FullName != "System.Object[]" ||
+                    target.Signature.ParameterTypes[target.Signature.ParameterTypes.Count - 1].FullName != "System.Object[]") continue;
+                string? key = instructions.Skip(index + 1).Take(at-index-1).Where(i => i.OpCode.Code == CilCode.Ldstr).Select(i => i.Operand as string).LastOrDefault();
+                if (key != null) yield return (executor, key);
+                break;
+            }
+        }
+    }
     private static long DecodeMethodKey(string positionString, int positionKey)
     {
         var decoded = Ascii85.FromAscii85String(positionString);
@@ -201,5 +251,3 @@ internal sealed class MethodDiscovery : StageBase
                && method.CilMethodBody is not null;
     }
 }
-
-

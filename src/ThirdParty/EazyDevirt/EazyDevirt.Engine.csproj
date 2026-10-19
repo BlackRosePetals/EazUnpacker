@@ -1,5 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup><TargetFramework>net48</TargetFramework><LangVersion>latest</LangVersion><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><AssemblyName>Unpacker.Devirt</AssemblyName></PropertyGroup>
+  <PropertyGroup><TargetFrameworks>net48;net8.0</TargetFrameworks><LangVersion>latest</LangVersion><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><AssemblyName>Unpacker.Devirt</AssemblyName></PropertyGroup>
+  <ItemGroup Condition="'$(TargetFramework)' != 'net48'"><Compile Remove="Compatibility.cs" /></ItemGroup>
   <ItemGroup>
     <Compile Remove="Program.cs;Devirtualization\Options\DevirtualizationOptionsBinder.cs" />
     <PackageReference Include="AsmResolver.DotNet" Version="6.0.0-beta.4" />

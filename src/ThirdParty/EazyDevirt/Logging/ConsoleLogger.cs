@@ -3,17 +3,44 @@ using EazyDevirt.Core.Abstractions.Interfaces;
 
 namespace EazyDevirt.Logging;
 
-internal  class ConsoleLogger : ILogger
+internal class ConsoleLogger : ILogger
 {
-    public void Success(object message) => WriteLine(message, ConsoleColor.Cyan, '+');
+    private static readonly System.Threading.AsyncLocal<ConsoleLogger?> Active = new();
+    private readonly object gate = new();
+    private StreamWriter? details;
+    private int verbosity, warnings;
 
-    public void Warning(object message) => WriteLine(message, ConsoleColor.Yellow, '-');
+    internal IDisposable Capture(string path, int level)
+    {
+        var previous=Active.Value;verbosity=level;warnings=0;
+        details=new StreamWriter(path,false,new System.Text.UTF8Encoding(false)){AutoFlush=true};Active.Value=this;
+        return new CaptureScope(()=>{lock(gate){details?.Dispose();details=null;Active.Value=previous;}});
+    }
+    private sealed class CaptureScope(Action close) : IDisposable { public void Dispose()=>close(); }
+    internal static void Detail(object message)
+    {
+        if(Active.Value is { } logger)logger.Info(message);
+        else if(Environment.GetEnvironmentVariable("UNPACKER_VM_DEBUG")=="1")Console.WriteLine(message);
+    }
+    internal void Summary(object message)
+    {
+        lock(gate){Record("summary",message);Console.WriteLine(message);}
+    }
+    private void Record(string level,object message)=>details?.WriteLine("["+DateTime.Now.ToString("HH:mm:ss")+"] ["+level+"] "+message);
+    public void Success(object message) {lock(gate){Record("success",message);if(verbosity>0)WriteLine(message, ConsoleColor.Cyan, '+');}}
 
-    public void Error(object message) => WriteLine(message, ConsoleColor.Red, '!');
+    public void Warning(object message)
+    {
+        lock(gate){Record("warning",message);warnings++;
+            if(verbosity>0||warnings<=10)WriteLine(message,ConsoleColor.Yellow,'-');
+            else if(warnings==11)Console.WriteLine("[VM] 其余警告已收录到 vm-detail.log。");}
+    }
 
-    public void Info(object message) => WriteLine(message, ConsoleColor.Gray, '*');
+    public void Error(object message) {lock(gate){Record("error",message);WriteLine(message, ConsoleColor.Red, '!');}}
 
-    public void InfoStr(object message, object message2) => WriteLineInfo(message, ConsoleColor.Red, message2);
+    public void Info(object message) {lock(gate){Record("detail",message);if(verbosity>0)WriteLine(message, ConsoleColor.Gray, '*');}}
+
+    public void InfoStr(object message, object message2) {lock(gate){Record("detail",message2+": "+message);if(verbosity>0)WriteLineInfo(message, ConsoleColor.Red, message2);}}
     
     public void ShowInfo(Version version, Version eazVersion)
     {

@@ -431,7 +431,6 @@ internal record Conv_R4 : IOpCodePattern
         CilOpCodes.Conv_R4,     // 27	003C	conv.r4
         CilOpCodes.Stloc_2,     // 28	003D	stloc.2
         CilOpCodes.Br_S,        // 29	003E	br.s	48 (006B) ldarg.0
-        CilOpCodes.Ldloc_1,     // 30	0040	ldloc.1
     };
 
     public override CilOpCode? CilOpCode => CilOpCodes.Conv_R4;
@@ -464,7 +463,6 @@ internal record Conv_R8 : IOpCodePattern
         CilOpCodes.Conv_R8,     // 27	003C	conv.r8
         CilOpCodes.Stloc_2,     // 28	003D	stloc.2
         CilOpCodes.Br_S,        // 29	003E	br.s	48 (006B) ldarg.0
-        CilOpCodes.Ldloc_1,     // 30	0040	ldloc.1
     };
 
     public override CilOpCode? CilOpCode => CilOpCodes.Conv_R8;

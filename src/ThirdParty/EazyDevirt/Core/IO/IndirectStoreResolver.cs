@@ -30,8 +30,9 @@ internal static class IndirectStoreResolver
         {
             var store = method.Instructions[i];
             if (store.OpCode.Code != CilCode.Stind_I) continue;
-            var producer = FindAddressProducer(method, i, boundaries);
-            TypeSignature? address = AddressType(method, producer);
+            TypeSignature? address;
+            try { address = AddressType(method, FindAddressProducer(method, i, boundaries)); }
+            catch (NotSupportedException) { address = FindAddressAcrossEdges(method, i); }
             var element = address switch
             {
                 ByReferenceTypeSignature byRef => byRef.BaseType,
@@ -79,12 +80,73 @@ internal static class IndirectStoreResolver
         throw new NotSupportedException("Indirect store address crosses an unresolved control-flow join.");
     }
 
+    private static TypeSignature FindAddressAcrossEdges(VMMethod method, int storeIndex)
+    {
+        var indices = method.VirtualOffsets.Select((offset, index) => (offset, index))
+            .GroupBy(pair => pair.offset).ToDictionary(group => group.Key, group => group.First().index);
+        var predecessors = Enumerable.Range(0, method.Instructions.Count).Select(_ => new List<int>()).ToArray();
+        void Edge(uint offset, int source)
+        {
+            if (!indices.TryGetValue(offset, out int target))
+                throw new NotSupportedException("Indirect store predecessor has no VM instruction target.");
+            predecessors[target].Add(source);
+        }
+        for (int i = 0; i < method.Instructions.Count; i++)
+        {
+            var instruction = method.Instructions[i];
+            if (instruction.OpCode.OperandType is CilOperandType.InlineBrTarget or CilOperandType.ShortInlineBrTarget)
+                Edge((uint)instruction.Operand!, i);
+            else if (instruction.Operand is int[] targets)
+                foreach (int target in targets) Edge(unchecked((uint)target), i);
+            if (i + 1 < method.Instructions.Count && instruction.OpCode.FlowControl is not
+                (CilFlowControl.Branch or CilFlowControl.Return or CilFlowControl.Throw))
+                predecessors[i + 1].Add(i);
+        }
+        var pending = new Stack<(int Index, int Depth)>();
+        foreach (int predecessor in predecessors[storeIndex]) pending.Push((predecessor, 1));
+        var visited = new HashSet<(int, int)>();
+        TypeSignature? result = null;
+        while (pending.Count != 0)
+        {
+            var state = pending.Pop();
+            if (!visited.Add(state)) continue;
+            if (visited.Count > 20000 || state.Depth < 0 || state.Depth > 4096)
+                throw new NotSupportedException("Indirect store address proof exceeded its bounded CFG search.");
+            var instruction = method.Instructions[state.Index];
+            if (instruction.OpCode.FlowControl is CilFlowControl.Return or CilFlowControl.Throw ||
+                instruction.OpCode.Code is CilCode.Leave or CilCode.Leave_S or CilCode.Endfinally or CilCode.Endfilter)
+                throw new NotSupportedException("Indirect store address crosses a stack-reset boundary.");
+            int depth;
+            if (instruction.OpCode.Code == CilCode.Dup)
+                depth = state.Depth < 2 ? 0 : state.Depth - 1;
+            else
+            {
+                int pushes = instruction.GetStackPushCount();
+                if (state.Depth < pushes)
+                {
+                    var address = AddressType(method, instruction);
+                    if (address is not (ByReferenceTypeSignature or PointerTypeSignature))
+                        throw new NotSupportedException("Indirect store predecessor does not prove an address type.");
+                    if (result != null && !SignatureComparer.Default.Equals(result, address))
+                        throw new NotSupportedException("Indirect store incoming address types disagree.");
+                    result = address;
+                    continue;
+                }
+                depth = checked(state.Depth - pushes + instruction.GetStackPopCount(method.Parent.CilMethodBody!));
+            }
+            if (predecessors[state.Index].Count == 0)
+                throw new NotSupportedException("Indirect store address has no proven incoming producer.");
+            foreach (int predecessor in predecessors[state.Index]) pending.Push((predecessor, depth));
+        }
+        return result ?? throw new NotSupportedException("Indirect store address CFG has no typed producer.");
+    }
+
     private static TypeSignature? AddressType(VMMethod method, CilInstruction instruction) => instruction.OpCode.Code switch
     {
         CilCode.Ldarg or CilCode.Ldarg_S or CilCode.Ldarg_0 or CilCode.Ldarg_1 or CilCode.Ldarg_2 or CilCode.Ldarg_3
-            => instruction.GetParameter(method.Parent.Parameters).ParameterType,
+            => ArgumentType(method, instruction),
         CilCode.Ldarga or CilCode.Ldarga_S
-            => new ByReferenceTypeSignature(instruction.GetParameter(method.Parent.Parameters).ParameterType),
+            => new ByReferenceTypeSignature(ArgumentType(method, instruction)),
         CilCode.Ldloc or CilCode.Ldloc_S or CilCode.Ldloc_0 or CilCode.Ldloc_1 or CilCode.Ldloc_2 or CilCode.Ldloc_3
             => instruction.GetLocalVariable(method.Locals).VariableType,
         CilCode.Ldloca or CilCode.Ldloca_S
@@ -97,4 +159,8 @@ internal static class IndirectStoreResolver
             => called.Signature!.ReturnType.InstantiateGenericTypes(GenericContext.FromMethod(called)),
         _ => null
     };
+
+    private static TypeSignature ArgumentType(VMMethod method, CilInstruction instruction) => method.ArgumentTypes is { } arguments
+        ? arguments[InlineVmCallAdapter.ArgumentIndex(instruction)]
+        : instruction.GetParameter(method.Parent.Parameters).ParameterType;
 }

@@ -1,4 +1,5 @@
-﻿using AsmResolver.DotNet.Code.Cil;
+using AsmResolver.DotNet.Code.Cil;
+using AsmResolver.DotNet.Signatures;
 using AsmResolver.PE.DotNet.Cil;
 using EazyDevirt.Core.Abstractions;
 using EazyDevirt.Core.Architecture;
@@ -45,17 +46,19 @@ internal class MethodDevirtualizer : StageBase
             catch(Exception ex) {
                 if(vmMethod.Parent.CilMethodBody!=originalBody)vmMethod.Parent.CilMethodBody=originalBody;
                 vmMethod.SuccessfullyDevirtualized=false;
+                vmMethod.RecoveredAdapter = null;
+                vmMethod.ArgumentTypes = null;
                 vmMethod.Failure = ex.GetType().Name + ": " + ex.Message;
-                Ctx.Console.Error($"[{vmMethod.Parent.MetadataToken}] Preserved original body: {ex.GetType().Name}: {ex.Message}");
+                Ctx.Console.Info($"[{vmMethod.Parent.MetadataToken}] Preserved original body: {ex.GetType().Name}: {ex.Message}");
                 if (Ctx.Options.VeryVeryVerbose) Ctx.Console.Warning(ex.StackTrace ?? "");
-                if (ex is AsmResolver.DotNet.Code.Cil.StackImbalanceException && vmMethod.Instructions != null)
-                    foreach (var instruction in vmMethod.Instructions.Skip(Math.Max(0, vmMethod.Instructions.Count - 45))) Ctx.Console.Info("Rejected IL: " + instruction);
+                if (Ctx.Options.VeryVeryVerbose && vmMethod.Instructions != null)
+                    foreach (var instruction in vmMethod.Instructions.Skip(Math.Max(0, vmMethod.Instructions.Count - 160))) Ctx.Console.Info("Rejected IL: " + instruction);
             }
             
             if (Ctx.Options.VeryVerbose)
                 Ctx.Console.Info(vmMethod);
             if(vmMethod.SuccessfullyDevirtualized)restoredInPass++;
-            Ctx.Progress?.Invoke("VM 方法还原（第 "+(pass+1)+" 轮，当前 "+vmMethod.Parent.MetadataToken+"）",restoredInPass,Ctx.VMMethods.Count);
+            Ctx.Progress?.Invoke("VM 调用点还原（第 "+(pass+1)+" 轮）",restoredInPass,Ctx.VMMethods.Count);
         }
         if(Ctx.VMMethods.Count(m=>m.SuccessfullyDevirtualized)==restoredBefore)break;
         }
@@ -72,12 +75,17 @@ internal class MethodDevirtualizer : StageBase
             try {
                 VMStream.Position=method.MethodKey;
                 var info=new VMMethodInfo(VMStreamReader,HeaderLayout);
-                candidates.RemoveWhere(mask=>((info.BindingFlags & mask)!=0)!=method.Parent.IsStatic);
-                if(HeaderLayout.TypeSlotsCalibrated)continue;
+                if(Ctx.Options.VeryVeryVerbose) Ctx.Console.Info($"Header sample {method.Parent.MetadataToken}: flags={info.BindingFlags}, metadata static={method.Parent.IsStatic}, name={method.Parent.Name}");
+                // Inlining may put a call to another virtual method inside a
+                // nonvirtual host. Such a call does not describe its host's
+                // static bit and must not poison the global header calibration.
                 string first=Resolver.ResolveType(info.VMDeclaringType)!.FullName;
                 string second=Resolver.ResolveType(info.VMReturnType)!.FullName;
                 string declaring=method.Parent.DeclaringType!.FullName,returns=method.Parent.Signature!.ReturnType.FullName;
-                if(first==declaring && second==returns || first==returns && second==declaring) {
+                bool matchingTypes = first==declaring && second==returns || first==returns && second==declaring;
+                if (info.Name == method.Parent.Name && matchingTypes && ParametersMatch(method, info))
+                    candidates.RemoveWhere(mask=>((info.BindingFlags & mask)!=0)!=method.Parent.IsStatic);
+                if (!HeaderLayout.TypeSlotsCalibrated && matchingTypes) {
                     HeaderLayout.FirstTypeIsReturn=first==returns;
                     HeaderLayout.TypeSlotsCalibrated=true;
                 }
@@ -85,7 +93,7 @@ internal class MethodDevirtualizer : StageBase
             catch(Exception ex) { Ctx.Console.Warning("Header calibration skipped: "+ex.Message); }
         }
         if(candidates.Count==1) {HeaderLayout.StaticMask=candidates.Single();HeaderLayout.StaticMaskCalibrated=true;}
-        Console.WriteLine($"VM header calibration: type slots={HeaderLayout.TypeSlotsCalibrated}, first return={HeaderLayout.FirstTypeIsReturn}, static mask={HeaderLayout.StaticMask} ({HeaderLayout.StaticMaskCalibrated})");
+        Ctx.Console.Info($"VM header calibration: type slots={HeaderLayout.TypeSlotsCalibrated}, first return={HeaderLayout.FirstTypeIsReturn}, static mask={HeaderLayout.StaticMask} ({HeaderLayout.StaticMaskCalibrated})");
     }
     
     private void ReadVMMethod(VMMethod vmMethod)
@@ -93,6 +101,32 @@ internal class MethodDevirtualizer : StageBase
         vmMethod.MethodInfo = new VMMethodInfo(VMStreamReader,HeaderLayout);
 
         ReadExceptionHandlers(vmMethod);
+
+        var wireDeclaringType = Resolver.ResolveType(vmMethod.MethodInfo.VMDeclaringType);
+        var wireReturnType = Resolver.ResolveType(vmMethod.MethodInfo.VMReturnType)!.ToTypeSignature();
+        bool wholeMethod = Ctx.VMMethods.Count(candidate => candidate.Parent == vmMethod.Parent) == 1 &&
+            vmMethod.Parent.Name == vmMethod.MethodInfo.Name &&
+            (vmMethod.Parent.DeclaringType!.FullName == wireDeclaringType?.FullName ||
+             OpenDeclaringType(vmMethod.Parent.DeclaringType).FullName == wireDeclaringType?.FullName) &&
+            vmMethod.Parent.Signature!.ReturnType.FullName == wireReturnType.FullName &&
+            (!HeaderLayout.StaticMaskCalibrated || vmMethod.Parent.IsStatic == vmMethod.MethodInfo.IsStatic) &&
+            ParametersMatch(vmMethod, vmMethod.MethodInfo);
+        if (!wholeMethod)
+        {
+            if (Ctx.Options.VeryVeryVerbose)
+            {
+                Ctx.Console.Info($"Non-stub VM host {vmMethod.Parent.MetadataToken}: header name={vmMethod.MethodInfo.Name}, declaring={wireDeclaringType?.FullName}, static={vmMethod.MethodInfo.IsStatic}; metadata={vmMethod.Parent.FullName}");
+                Ctx.Console.Info("Wire arguments: " + string.Join(", ", vmMethod.MethodInfo.VMParameters.Select(parameter => Resolver.ResolveType(parameter.VMType)!.FullName + (parameter.In ? " [in/ref]" : ""))));
+            }
+            var owner = wireDeclaringType?.Resolve();
+            if (owner?.DeclaringModule != Ctx.Module)
+                throw new NotSupportedException("Inlined VM body declaring type is outside the input module.");
+            var arguments = vmMethod.MethodInfo.VMParameters.Select(parameter => {
+                var type = Resolver.ResolveType(parameter.VMType)!.ToTypeSignature();
+                return parameter.In && type is not ByReferenceTypeSignature ? new ByReferenceTypeSignature(type) : type;
+            }).ToArray();
+            vmMethod.RecoveredAdapter = InlineVmCallAdapter.Create(vmMethod, owner, arguments);
+        }
         
         // These types already exist in the original method signature; header slots are shuffled independently.
         vmMethod.MethodInfo.DeclaringType = vmMethod.Parent.DeclaringType!;
@@ -116,12 +150,52 @@ internal class MethodDevirtualizer : StageBase
         vmMethod.ExceptionHandlers.ForEach(x=>newBody.ExceptionHandlers.Add(x));
         vmMethod.Instructions.ForEach(x=>newBody.Instructions.Add(x));
         newBody.VerifyLabelsOnBuild=false;newBody.ComputeMaxStackOnBuild=false;
-        vmMethod.Parent.CilMethodBody=newBody;
+        var bodyMethod = vmMethod.RecoveredAdapter ?? vmMethod.Parent;
+        bodyMethod.CilMethodBody=newBody;
+        if (vmMethod.Inlined) InlineVmCallAdapter.RewriteBody(vmMethod, newBody, wireReturnType);
+        vmMethod.AccessBridges.AddRange(VmAccessBridge.Rewrite(bodyMethod, vmMethod.AdapterDeclaringType ?? vmMethod.Parent.DeclaringType));
         if (vmMethod.SuccessfullyDevirtualized && !Ctx.Options.NoVerify)
         {
             newBody.MaxStack=newBody.ComputeMaxStack();
             newBody.VerifyLabels();
         }
+        if (vmMethod.Inlined)
+        {
+            vmMethod.AdapterDeclaringType!.Methods.Add(bodyMethod);
+            vmMethod.ExecutorInstruction!.OpCode = CilOpCodes.Call;
+            vmMethod.ExecutorInstruction.Operand = bodyMethod;
+            Ctx.Console.Info($"Recovered inlined VM call in {vmMethod.Parent.MetadataToken} using {bodyMethod.Name}; host body retained.");
+        }
+    }
+
+    private bool ParametersMatch(VMMethod method, VMMethodInfo info)
+    {
+        int first = method.Parent.IsStatic ? 0 : 1;
+        if (method.Parent.Parameters.Count + first != info.VMParameters.Count) return false;
+        for (int i = 0; i < info.VMParameters.Count; i++)
+        {
+            var encoded = info.VMParameters[i];
+            string wire = Resolver.ResolveType(encoded.VMType)!.FullName;
+            var metadata = first == 1 && i == 0
+                ? OpenDeclaringType(method.Parent.DeclaringType!)
+                : method.Parent.Parameters[i - first].ParameterType;
+            if (metadata.FullName == wire) continue;
+            // Some VM headers put the byref shape in the separate parameter
+            // flag. Require that flag as well as an exact element signature.
+            if (encoded.In && metadata is AsmResolver.DotNet.Signatures.ByReferenceTypeSignature reference && reference.BaseType.FullName == wire)
+                continue;
+            return false;
+        }
+        return true;
+    }
+
+    private static AsmResolver.DotNet.Signatures.TypeSignature OpenDeclaringType(AsmResolver.DotNet.TypeDefinition type)
+    {
+        var signature = type.ToTypeSignature();
+        return type.GenericParameters.Count == 0 ? signature : new AsmResolver.DotNet.Signatures.GenericInstanceTypeSignature(type, type.IsValueType,
+            Enumerable.Range(0, type.GenericParameters.Count).Select(index =>
+                (AsmResolver.DotNet.Signatures.TypeSignature)new AsmResolver.DotNet.Signatures.GenericParameterSignature(
+                    type.DeclaringModule!, AsmResolver.DotNet.Signatures.GenericParameterType.Type, index)).ToArray());
     }
     
     private void ReadExceptionHandlers(VMMethod vmMethod)
@@ -226,9 +300,9 @@ internal class MethodDevirtualizer : StageBase
             {
                 // Log these for now since they're special cases. 
                 if (vmOpCode.CilOpCode.Value.Mnemonic.StartsWith("stind"))
-                    Ctx.Console.Warning($"Placing stind instruction at #{vmMethod.Instructions.Count}");
+                    Ctx.Console.Info($"Placing stind instruction at #{vmMethod.Instructions.Count}");
                 else if (vmOpCode.SpecialOpCode == SpecialOpCodes.NoBody)
-                    Ctx.Console.Warning($"Placing NoBody instruction at #{vmMethod.Instructions.Count}");
+                    Ctx.Console.Info($"Placing NoBody instruction at #{vmMethod.Instructions.Count}");
 
                 if (vmOpCode.CilOpCode.Value.OperandType != CilOperandType.InlineNone && operand == null)
                     throw new InvalidDataException("Unresolved CIL operand: " + vmOpCode.CilOpCode);
@@ -243,7 +317,7 @@ internal class MethodDevirtualizer : StageBase
         if (encrypted) throw new InvalidDataException("Encrypted region end marker is missing.");
     }
 
-    private Dictionary<uint, int> GetVirtualOffsets(VMMethod vmMethod)
+    internal static Dictionary<uint, int> GetVirtualOffsets(VMMethod vmMethod)
     {
         var virtualOffsets = new Dictionary<uint, int>(vmMethod.Instructions.Count);
         var lastCilOffset = 0;
@@ -252,7 +326,12 @@ internal class MethodDevirtualizer : StageBase
             var ins = vmMethod.Instructions[i];
             ins.Offset = lastCilOffset;
             if (!virtualOffsets.ContainsKey(vmMethod.VirtualOffsets[i])) virtualOffsets.Add(vmMethod.VirtualOffsets[i], lastCilOffset);
-            lastCilOffset += ins.Size;
+            // Before branch resolution switch operands are raw VM offsets (int[]).
+            // AsmResolver only counts switch entries represented by ICilLabel,
+            // otherwise every following label lands inside the switch table.
+            lastCilOffset += ins.OpCode.OperandType == CilOperandType.InlineSwitch && ins.Operand is int[] targets
+                ? ins.OpCode.Size + sizeof(int) * (targets.Length + 1)
+                : ins.Size;
         }
         virtualOffsets.Add((uint)vmMethod.CodeSize, lastCilOffset);
 
@@ -307,6 +386,11 @@ internal class MethodDevirtualizer : StageBase
             // HandlerEnd is not explicitly defined, and we don't have a length, so we need to find it ourselves
             var handlerEndIndex = vmMethod.Instructions.GetIndexByOffset(virtualOffsets[vmExceptionHandler.HandlerStart]);
             var foundHandlerEnd = false;
+            if (vmExceptionHandler.HandlerType is CilExceptionHandlerType.Finally or CilExceptionHandlerType.Fault)
+            {
+                handlerEndIndex = FindFinallyHandlerEnd(vmMethod.Instructions, handlerEndIndex);
+                foundHandlerEnd = true;
+            }
             while (!foundHandlerEnd && vmMethod.Instructions.Count - 1 > handlerEndIndex)
             {
                 var possibleHandlerEnd = vmMethod.Instructions[handlerEndIndex];
@@ -332,7 +416,16 @@ internal class MethodDevirtualizer : StageBase
                     case CilCode.Leave_S:
                         if (possibleHandlerEnd.Operand is ICilLabel target &&
                             target.Offset >= exceptionHandler.HandlerStart?.Offset)
+                        {
+                            // An inner try/finally leaves to a continuation in
+                            // this outer finally, not out of the outer handler.
+                            if (vmExceptionHandler.HandlerType is CilExceptionHandlerType.Finally or CilExceptionHandlerType.Fault)
+                            {
+                                handlerEndIndex = vmMethod.Instructions.GetIndexByOffset(target.Offset);
+                                continue;
+                            }
                             foundHandlerEnd = true;
+                        }
                         break;
                     case CilCode.Ret:
                         // this shouldn't happen, but this makes the handler end set on the ret instruction instead of one after it
@@ -365,6 +458,25 @@ internal class MethodDevirtualizer : StageBase
             
             vmMethod.ExceptionHandlers.Add(exceptionHandler);
         }
+    }
+
+    internal static int FindFinallyHandlerEnd(IList<CilInstruction> instructions, int start)
+    {
+        var visited = new HashSet<int>();
+        int index = start;
+        while (index >= 0 && index < instructions.Count && visited.Add(index))
+        {
+            var instruction = instructions[index];
+            if (instruction.OpCode.Code is CilCode.Endfinally or CilCode.Throw or CilCode.Rethrow)
+                return index + 1;
+            if ((instruction.IsBranch() || instruction.OpCode.Code is CilCode.Leave or CilCode.Leave_S) && instruction.Operand is ICilLabel label)
+            {
+                index = instructions.ToList().FindIndex(item => item.Offset == label.Offset);
+                continue;
+            }
+            index++;
+        }
+        throw new InvalidDataException("Finally handler has no bounded terminal continuation.");
     }
 
     private object? ReadOperand(VMOpCode vmOpCode, VMMethod vmMethod)
