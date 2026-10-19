@@ -10,8 +10,9 @@ $PSNativeCommandUseErrorActionPreference=$false
 if($Version -notmatch '^\d+\.\d+\.\d+$'){throw 'Version must have major.minor.patch format.'}
 $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $output=[IO.Path]::GetFullPath($OutputDirectory)
-$commit=(& git -C $repo rev-parse --verify "$Ref^{commit}").Trim()
+$resolved=& git -C $repo rev-parse --verify --end-of-options "$Ref~0"
 if($LASTEXITCODE -ne 0){throw 'Cannot resolve the requested commit.'}
+$commit=([string]$resolved).Trim()
 New-Item -ItemType Directory -Path $output -Force|Out-Null
 $name="EazUnpacker-v$Version"
 $zip=Join-Path $output "$name-win.zip"
