@@ -1,171 +1,230 @@
 # EazUnpacker
 
-![Supported Eazfuscator.NET versions: 2021.1–2026.2](https://img.shields.io/badge/Eazfuscator.NET-2021.1%E2%80%932026.2-2563eb)
+面向 **Eazfuscator.NET 托管程序集**的命令行解包与反混淆工具。恢复可分析的 IL，生成可读名称，并可选导出 C# 工程。
 
-A command-line unpacker and deobfuscator for Eazfuscator.NET assemblies, with IL recovery and C# source export.
+**简体中文** · [English](README.en.md) · **v1.1.0** · [更新日志](CHANGELOG.md)
 
-面向 Eazfuscator.NET 程序集的命令行解包与去混淆工具，支持 IL 恢复和 C# 源码导出。
+[快速开始](#快速开始) · [功能特点](#主要功能) · [参数](#参数与退出码) · [日志](#日志与统计) · [常见问题](#常见问题) · [开发](#开发与测试)
 
-[English](#english) · [简体中文](#简体中文) · [Before / After · 效果对比](#before--after--效果对比)
+> 按元数据与 IL 语义识别保护，不按样本名称或预设密钥表匹配。支持范围以实际恢复报告为准，不承诺任意样本“完全还原”。
 
-## Before / After · 效果对比
+## 主要功能
 
-### 1. Entry-point cleanup · 入口方法整理
+| 能力 | 说明 |
+| --- | --- |
+| 字符串与资源 | 恢复受支持的字符串、资源及内嵌程序集；提取并核对 Costura 托管依赖身份 |
+| VM 还原 | 识别 VM 格式和调用点，恢复受支持的指令、签名及异常区域；失败时保留原方法 |
+| 内联与代理 | 恢复一个宿主内的多个 VM 调用；支持受约束的 `ref` 写回；整理透明代理链，内联有界的纯整数叶表达式 |
+| 控制流 | 折叠可证明的整数/枚举条件，整理 switch 分发、跳转链与单前驱常量，删除不可达指令和无用局部写入 |
+| 可读命名 | 按类型角色、继承和入口点生成名称，精简参数名，保留名称映射与 Portable PDB |
+| 密钥日志 | 通过原校验后输出密钥、Token、输入中的原命名空间/类名/方法签名；保留结构化记录 |
+| 可选源码导出 | 使用 ILSpy 导出 C# 工程、字符串索引并尝试重构建 |
+| 可选 CLR 检查 | 显式检查恢复后的宿主、内联适配器及访问桥；**默认关闭** |
 
-**Before · 之前（图 1）**
+## 快速开始
 
-![Entry point before processing: obfuscated identifiers and constant conditional branches / 处理前的入口方法：混淆标识符和恒定条件分支](src/assets/screenshots/entry-point-before.png)
+### 1. 解压完整发布包
 
-**After · 之后（图 2）**
+解压 `EazUnpacker-v1.1.0-win.zip`，保留 `worker\modern` 等所有子目录。入口为 `Unpacker.exe`，不要只复制 EXE。
 
-![Entry point after processing: readable identifiers, decoded strings and simplified branches / 处理后的入口方法：可读标识符、还原字符串和简化分支](src/assets/screenshots/entry-point-after.png)
+- **运行环境**：Windows、.NET Framework 4.8；处理现代 .NET 目标还需要相应的 .NET Desktop Runtime。现代后端以 .NET 8 为目标，可向已安装的更新主版本滚动。
+- **目录权限**：解压到可写目录，程序会在自身目录建立 `temp`。
+- **是否需要 SDK**：普通解包不需要；源码重构建需要 .NET SDK 和目标项目所需引用。开发构建见[开发与测试](#开发与测试)。
 
-### 2. String recovery and control-flow cleanup · 字符串恢复与控制流整理
+### 2. 运行命令
 
-**Before · 之前（图 3）**
+在解压后的目录打开 PowerShell：
 
-![Method before processing: string decoder calls and redundant conditional branches / 处理前的方法：字符串解码调用和冗余条件分支](src/assets/screenshots/method-before.png)
+```powershell
+# 默认：恢复 IL 并输出程序，不执行 CLR 准备检查，不导出源码
+.\Unpacker.exe unpack "C:\samples\input.dll" "C:\output\input_unpacked.dll"
 
-**After · 之后（图 4）**
+# 显式开启 CLR 检查
+.\Unpacker.exe unpack "C:\samples\input.dll" "C:\output\input_unpacked.dll" --validate-clr
 
-![Method after processing: visible string literals and simplified control flow / 处理后的方法：可见的字符串字面量和简化的控制流](src/assets/screenshots/method-after.png)
+# 导出并尝试重构建 C#；CLR 检查仍需单独开启
+.\Unpacker.exe unpack "C:\samples\input.exe" "C:\output\input_unpacked.exe" --export-source --validate-clr
 
-## English
+# 静态元数据分析，标准输出为 JSON
+.\Unpacker.exe analyzer "C:\samples\input.dll"
+```
 
-### Supported versions
+### 3. 查看输出与结果
 
-**Eazfuscator.NET 2021.1–2026.2**, inclusive.
+控制台会显示输出文件、诊断目录和结束统计。先确认退出码，再查看对应运行目录的 `result.json`；没有执行的检查不代表检查通过。
 
-### Features
+输入与输出不能相同。只要生成了恢复程序集，即使后续阶段未完成也会尽量发布，并明确记录部分完成状态。Framework EXE 的生成 `.config` 应与 EXE 一起部署；DLL 仍受宿主配置和依赖影响。
 
-- Assembly unpacking and recovery of strings, resources and embedded assemblies.
-- Control-flow cleanup and devirtualization of supported VM methods.
-- Readable identifier generation and C# project export with a rebuild step.
-- JSON analysis output and recovery progress in the CLI.
+最终符号文件与输出同名，例如 `input_unpacked.dll` 只配套 `input_unpacked.pdb`，不额外输出 `input-recovered.pdb`。DLL 内的 CodeView 名称同步更新，长文件名和中文路径也无需额外 PDB 别名；处理中间文件留在 `temp`。
 
-Generated names improve readability; they do not recover the author's original names when original symbols are unavailable. Support depends on the protections and assembly being processed.
+## 参数与退出码
 
-### Build
+| 参数 | 默认 | 作用 |
+| --- | --- | --- |
+| `--export-source` | 关闭 | 额外导出 C# 工程、字符串索引，并尝试编译 |
+| `--validate-clr` | 关闭 | 开启恢复 IL 的 CLR 准备检查；同时导出源码时也检查重构建方法 |
 
-Requires Windows, .NET Framework 4.8, and a .NET SDK with `.slnx` support (9.0.200 or newer). The first build restores NuGet dependencies.
+选项可放在输入/输出路径之前或之后；未知或重复选项报错。未请求的可选阶段不计为恢复失败，未检查不代表检查通过。
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 请求的处理阶段完成 |
+| `2` | 已有输出，但恢复或显式请求的附加阶段未全部完成 |
+| `1` | 参数、输入或处理错误 |
+
+## 日志与统计
+
+默认显示阶段、进度、已验证密钥、未恢复摘要和结束统计，区分 **VM 宿主方法数**与 **VM 调用点数**，不把普通方法都计为“恢复方法”。中文日志采用 UTF-8。
+
+| 文件 | 内容 |
+| --- | --- |
+| `progress.log` / `progress.jsonl` | 可读进度 / 结构化事件 |
+| `vm-summary.json` / `vm-methods.json` | VM 汇总 / 逐调用点结果 |
+| `vm-keys.jsonl` / `vm-keys.json` | 即时密钥记录 / 结束时列表，含原名称与来源 |
+| `vm-detail.log` | 底层 VM 诊断，默认不刷屏 |
+| `inline-expressions.json` | 整数表达式内联位置与证据 |
+| `rename-map.json` / `control-flow-cleanup.json` | 重命名映射 / 控制流修改统计 |
+| `recovery-statistics.json` / `result.json` | 总统计 / 各阶段状态 |
+| `clr-validation.json` | 仅请求且存在待验证 VM 方法时生成 |
+
+“原名称”指本轮 VM 输入中仍存在的名称，不是找回已丢失的作者符号。密钥通过校验也不保证后续区域解码必然成功。
+
+### 常用环境变量
+
+| 变量 | 用途 |
+| --- | --- |
+| `UNPACKER_DEPENDENCY_PATHS` | 额外依赖目录；Windows 下用 `;` 分隔绝对路径 |
+| `UNPACKER_VM_VERBOSE=1` | 输出更多映射信息 |
+| `UNPACKER_VM_DEBUG=1` | 输出逐方法/指令等调试细节 |
+| `UNPACKER_VM_KEY_SEARCH_LIMIT` | 有界整数候选搜索次数，默认 `65536`；`0` 禁用，上限一千万 |
+| `UNPACKER_VM_INT32_KEYS` | 显式整数候选，逗号分隔；仍须通过原校验 |
+| `UNPACKER_VM_USE_KEY_CACHE=1` | 允许读取显式指定的历史候选缓存 |
+| `UNPACKER_VM_KEY_CACHE_PATH` | 候选缓存文件路径；不默认读取或捆绑样本密钥表 |
+
+## 临时目录与输出位置
+
+临时文件统一位于 **程序目录下的 `temp`**，不再写入 `%LOCALAPPDATA%\Unpacker\work`。这里的程序目录是 `Unpacker.exe` 所在目录，不是启动命令时的当前目录。
+
+```text
+Unpacker.exe
+worker/
+  Unpacker.Worker.exe
+  modern/
+temp/
+  work/<输出路径哈希>/
+    latest.json
+    run-<时间>-<唯一标识>/
+      result.json
+      progress.log
+      ...
+  analysis-<唯一标识>/       # 分析结束后删除
+  tests-<唯一标识>/          # 自测结束后删除
+```
+
+主程序和配套 worker 共用该位置，子进程的 `TEMP` / `TMP` 也指向此处。程序目录必须可写；不可写时会报错，不静默转存其他位置。诊断、源码导出和重构建产物保留在对应运行目录；处理进程全部退出后可自行清理 `temp`。旧版本的 AppData 缓存不自动迁移或删除。
+
+## 验证边界
+
+- 任意运行时密钥、任意 VM 变体及任意混淆无法保证自动恢复；含循环或复杂汇合的常量分支仍可能未折叠。
+- 整数叶表达式内联保留参数求值顺序和次数；有异常/字段/外部调用/泛型/前缀等未证明安全的函数不强行内联。
+- 控制流简化只处理有证据的情况；多前驱未知状态、引用逃逸、异常区域和可达副作用保留。
+- 原方法/类型定义与 token 尽量保留，不根据名字或“看起来像垃圾”删除反射可见成员、校验器及资源。
+- `EncryptedRegions=0` 不等于模块不存在加密；生成的名称不是原始源码符号。
+- CLR 检查是加载/JIT 准备，不是完整业务等价性验证；即便不显式调用业务方法，也可能触发初始化。关闭 CLR 检查不代表工具完全不执行目标解码代码。
+- 现有本地报告曾验证 Aspose 29 DLL 的 3305 个 VM 调用点；VBA 324 个调用点已恢复，脱离 Office/VBE 宿主的 5 项初始化失败仍保留。历史结果不自动代表后续每次构建均已重测。
+
+## 常见问题
+
+**为什么有空方法或重复代码？**
+
+原程序可能已经包含空事件处理器；VM 解码也可能恢复出只有 `ret` 的方法。相似代码可能来自不同业务分支或保护阶段的内联。工具没有承诺自动逆内联，也不会仅凭外观相同就删除有副作用的代码。可使用开发章节中的空方法对比脚本核对原始 IL。
+
+**为什么退出码为 `2`，但仍有 DLL/EXE？**
+
+工具会尽量保留已完成的恢复结果。检查 `result.json` 中的失败阶段，区分 VM 未恢复、显式 CLR 检查失败和源码编译失败；不要只看输出文件是否存在。
+
+**为什么反编译源码不能直接编译？**
+
+IL 可读不等于原始源码结构已恢复。源码导出是可选附加功能，可能受编译器表达能力、缺失依赖和宿主环境限制。导出失败不会撤回已经发布的恢复程序集。
+
+**日志和源码在哪里？能删除吗？**
+
+控制台会显示本次 `temp\work\...\run-...` 的完整路径。处理进程全部退出后可以清理 `temp`；先保留所需报告、密钥记录和导出源码。
+
+## 效果示例
+
+<details>
+<summary>入口点整理：处理前 / 处理后</summary>
+
+![入口点处理前](src/assets/screenshots/entry-point-before.png)
+![入口点处理后](src/assets/screenshots/entry-point-after.png)
+
+</details>
+
+<details>
+<summary>字符串与控制流：处理前 / 处理后</summary>
+
+![方法处理前](src/assets/screenshots/method-before.png)
+![方法处理后](src/assets/screenshots/method-after.png)
+
+</details>
+
+## 第三方依赖与许可
+
+组合项目采用 [GPL-3.0](LICENSE)。第三方组件保留各自许可证；来源、固定源码基线和本地修改说明见 [NOTICE](NOTICE)。
+
+### 内置源码
+
+| 组件 | 用途 | 许可证 |
+| --- | --- | --- |
+| [EazFixer](src/ThirdParty/EazFixer) | 字符串、资源与内嵌程序集恢复 | [MIT](src/ThirdParty/EazFixer/LICENSE) |
+| [EazyDevirt](src/ThirdParty/EazyDevirt) | VM 格式识别、解码与 IL 恢复 | [GPL-3.0](src/ThirdParty/EazyDevirt/LICENSE) |
+| [Echo](src/ThirdParty/Echo) | CIL 分析与解释基础设施 | [LGPL-3.0](src/ThirdParty/Echo/LICENSE.md) |
+
+### 主要 NuGet 引用
+
+| 包 | 项目固定版本 | 用途 |
+| --- | --- | --- |
+| dnlib | 4.5.0 | 托管元数据、IL 与 PDB 改写 |
+| AsmResolver.DotNet | 6.0.0-beta.4 | VM 后端的 PE/元数据与 CIL 生成 |
+| Lib.Harmony | 2.4.2 | 独立解码后端中的运行时适配 |
+| BouncyCastle.Cryptography | 2.5.1 | VM 加密流相关实现 |
+| ICSharpCode.Decompiler | 11.1.0.9782 | ILSpy C# 反编译与工程导出 |
+| Newtonsoft.Json | 13.0.3 | 报告和进度序列化 |
+| System.Memory | 4.6.3（主项目） | Framework 兼容支持 |
+
+Echo 另保留其固定上游引用，如 `System.Collections.Immutable`、`Nullable`。完整直接/传递引用及其许可证以项目文件、NuGet 元数据和包内许可为准；这不是“最新版本”列表。
+
+## 开发与测试
+
+从仓库根目录执行。需要支持 `.slnx` 的 .NET SDK 和 .NET Framework 4.8 开发引用。本次 v1.1.0 发布使用 .NET 10 SDK 构建。
 
 ```powershell
 dotnet build Unpacker.slnx -c Release
-# Also build the optional modern .NET backend
-dotnet build src/ModernWorker/ModernWorker.csproj -c Release
 ```
 
-You can also open `Unpacker.slnx`. Output is written to `src\bin\Release\net48`; distribute the entire output directory, including its worker processes. If using the optional modern backend, copy the contents of `src\ModernWorker\bin\Release\net8.0-windows` into `src\bin\Release\net48\worker\modern`. This backend requires the .NET 8 Desktop Runtime.
-
-### Usage
+构建入口为 `src\bin\Release\net48\Unpacker.exe`。发布脚本从提交快照构建、运行自测，并排除样本、缓存及临时文件：
 
 ```powershell
-.\src\bin\Release\net48\Unpacker.exe unpack "C:\input.exe" "C:\output.exe"
-# Optional: also export and rebuild the C# project
-.\src\bin\Release\net48\Unpacker.exe unpack "C:\input.exe" "C:\output.exe" --export-source
-.\src\bin\Release\net48\Unpacker.exe analyzer "C:\input.exe"
+pwsh -File .\scripts\Build-Release.ps1
 ```
 
-By default, `unpack` only recovers and publishes the unpacked program; it does not export source, build a string search index, rebuild C#, or validate a rebuilt assembly. Add `--export-source` before or after the input/output paths to enable those additional stages. Source export is disabled by default, not an incomplete/skipped recovery stage.
-
-For .NET Framework EXE output, deploy the generated `.config` alongside the executable. Logs, diagnostics and any explicitly requested source export are stored in `%LOCALAPPDATA%\Unpacker\work`. The `analyzer` command returns JSON that includes the generated project location when available.
-
-Any available recovered assembly is published to the requested output path, including partial recovery results. Incomplete VM recovery, CLR checks, runtime configuration or source rebuilding do not discard an already generated output; diagnostics retain the incomplete status.
-
-Exit codes: `0` for completion of the requested stages, `2` for incomplete recovery (or source rebuilding/validation when `--export-source` is requested), and `1` for input, command or processing errors.
-
-### Source layout
-
-| Path | Purpose |
-| --- | --- |
-| `src/` | Main program and project file |
-| `src/ThirdParty/` | Required EazFixer, EazyDevirt and Echo source dependencies |
-| `src/WorkerHost/` | Required .NET Framework worker process |
-| `src/ModernWorker/` | Optional .NET 8 worker for modern .NET assemblies |
-| `src/tests/` | Regression scripts and behavior validation tools |
-| `src/assets/screenshots/` | Before-and-after screenshots used in this README |
-
-### Testing
+发布包内含对应提交的源码压缩包、许可证和文件哈希清单。
 
 ```powershell
-# Built-in tests; no external samples required
+# 不需要外部样本的 Framework / 现代后端自测
 .\src\bin\Release\net48\worker\Unpacker.Worker.exe --self-test
-# CLI source export option regression using a fully supported sample
-.\src\tests\SourceExportOptions.ps1 -InputAssembly "C:\samples\input.exe"
-# Regression tests using a prepared sample directory
-.\src\tests\Regression.ps1 -SampleRoot "C:\samples"
+.\src\bin\Release\net48\worker\modern\Unpacker.ModernWorker.exe --self-test
+
+# 使用自备样本验证 CLR 开关和程序本地临时目录
+.\src\tests\ClrValidationOptions.ps1 -InputAssembly "C:\samples\input.dll"
+
+# 按保留的 MethodDef Token 对比空方法，区分原本为空与恢复后为空
+.\src\tests\CompareEmptyMethods.ps1 -Original "C:\samples\input.dll" -Recovered "C:\samples\input_unpacked.dll" -Report "C:\samples\empty-methods.json"
+
+# 严格矩阵显式开启 CLR 检查，失败结果仍如实记录
+.\src\tests\AsposeCompatibility.ps1 -SampleRoot "C:\samples\Aspose" -RequireComplete
+.\src\tests\VersionCompatibility.ps1 -SampleRoot "C:\samples" -RequireComplete
 ```
 
-### License
-
-The combined project is licensed under GPL-3.0; see [LICENSE](LICENSE). Third-party components retain their own licenses. Sources and attribution are listed in [NOTICE](NOTICE).
-
-## 简体中文
-
-### 支持版本
-
-**Eazfuscator.NET 2021.1 至 2026.2**，包含起止版本。
-
-### 功能
-
-- 程序集解包，恢复字符串、资源及内嵌程序集。
-- 整理控制流，对受支持的 VM 方法进行反虚拟化。
-- 生成可读标识符，导出 C# 工程并执行重构建。
-- 通过命令行显示处理进度，支持 JSON 分析输出。
-
-缺少原始符号时，生成的名称用于改善可读性，不等于恢复了原作者命名。具体支持情况取决于目标程序集及其保护方式。
-
-### 构建
-
-需要 Windows、.NET Framework 4.8 和支持 `.slnx` 的 .NET SDK（9.0.200 或更新版本）。首次构建会还原 NuGet 依赖。
-
-```powershell
-dotnet build Unpacker.slnx -c Release
-# 同时构建可选的现代 .NET 后端
-dotnet build src/ModernWorker/ModernWorker.csproj -c Release
-```
-
-也可打开 `Unpacker.slnx`。输出位于 `src\bin\Release\net48`，分发时保留整个输出目录及工作进程。使用可选现代后端时，将 `src\ModernWorker\bin\Release\net8.0-windows` 内的文件复制到 `src\bin\Release\net48\worker\modern`；该后端需要 .NET 8 桌面运行时。
-
-### 使用
-
-```powershell
-.\src\bin\Release\net48\Unpacker.exe unpack "C:\input.exe" "C:\output.exe"
-# 可选：同时导出并重构建 C# 工程
-.\src\bin\Release\net48\Unpacker.exe unpack "C:\input.exe" "C:\output.exe" --export-source
-.\src\bin\Release\net48\Unpacker.exe analyzer "C:\input.exe"
-```
-
-`unpack` 默认只恢复并输出 unpacked 程序，不导出源码、不生成字符串搜索索引、不重构建 C#，也不检查重编译产物。在输入/输出路径之前或之后添加 `--export-source` 才会执行这些附加阶段。未开启源码导出不视为恢复不完整或跳过恢复阶段。
-
-传统 .NET Framework EXE 输出包含必需的 `.config`，应与程序一起部署。日志、诊断文件与显式请求导出的源码保存在 `%LOCALAPPDATA%\Unpacker\work`。`analyzer` 输出 JSON，在生成工程可用时提供其位置。
-
-后台只要生成了恢复程序集，就会发布到指定输出路径，包括部分恢复结果。VM 还原、CLR 检查、运行配置或源码重建未完成时，仍保留已生成的输出，并在诊断中记录未完成状态。
-
-退出码：`0` 表示请求的阶段完成，`2` 表示恢复不完整，或启用 `--export-source` 后源码重建/验证不完整，`1` 表示输入、命令或处理错误。
-
-### 源码结构
-
-| 路径 | 用途 |
-| --- | --- |
-| `src/` | 主程序源码和项目文件 |
-| `src/ThirdParty/` | 编译必需的 EazFixer、EazyDevirt 与 Echo 源码依赖 |
-| `src/WorkerHost/` | 主程序必需的 .NET Framework 工作进程 |
-| `src/ModernWorker/` | 处理现代 .NET 程序集的可选 .NET 8 工作进程 |
-| `src/tests/` | 回归脚本和行为验证工具 |
-| `src/assets/screenshots/` | README 使用的处理前后效果图 |
-
-### 测试
-
-```powershell
-# 无需外部样本的内置测试
-.\src\bin\Release\net48\worker\Unpacker.Worker.exe --self-test
-# 使用完全支持的样本验证源码导出选项
-.\src\tests\SourceExportOptions.ps1 -InputAssembly "C:\samples\input.exe"
-# 使用准备好的样本目录运行回归测试
-.\src\tests\Regression.ps1 -SampleRoot "C:\samples"
-```
-
-### 许可证
-
-组合项目采用 GPL-3.0，见 [LICENSE](LICENSE)。第三方源码保留各自许可证，来源和署名见 [NOTICE](NOTICE)。
+源码：`src/`；两类后端：`src/WorkerHost/`、`src/ModernWorker/`；通用恢复组件：`src/ThirdParty/`；回归脚本：`src/tests/`。
