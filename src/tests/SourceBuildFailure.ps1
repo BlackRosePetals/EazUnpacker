@@ -3,7 +3,7 @@ param(
     [string]$Tool = (Join-Path $PSScriptRoot '..\bin\Release\net48\Unpacker.exe')
 )
 $ErrorActionPreference = 'Stop'
-$root = Join-Path ([IO.Path]::GetTempPath()) ('unpacker-source-failure-' + [guid]::NewGuid().ToString('N'))
+$root = Join-Path (Join-Path (Split-Path ([IO.Path]::GetFullPath($Tool))) 'temp') ('unpacker-source-failure-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root | Out-Null
 $output = Join-Path $root 'unpacked.exe'
 $previous = $env:MSBuildSDKsPath

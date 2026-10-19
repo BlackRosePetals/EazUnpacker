@@ -3,7 +3,7 @@ param(
     [string]$Tool = (Join-Path $PSScriptRoot '..\bin\Release\net48\Unpacker.exe')
 )
 $ErrorActionPreference = 'Stop'
-$root = Join-Path ([IO.Path]::GetTempPath()) ('unpacker-partial-publication-' + [guid]::NewGuid().ToString('N'))
+$root = Join-Path (Join-Path (Split-Path ([IO.Path]::GetFullPath($Tool))) 'temp') ('unpacker-partial-publication-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root | Out-Null
 $inputHash = (Get-FileHash -LiteralPath $InputAssembly -Algorithm SHA256).Hash
 # A harmless dup/pop in a handler makes a valid, deliberately unsupported VM
@@ -45,7 +45,7 @@ foreach ($malformedConfig in @($false, $true)) {
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $key = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($output).ToUpperInvariant()))).Replace('-','').ToLowerInvariant() }
     finally { $sha.Dispose() }
-    $latestPath = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) ('Unpacker\work\' + $key + '\latest.json')
+    $latestPath = Join-Path (Split-Path $Tool) ('temp\work\' + $key + '\latest.json')
     $latest = Get-Content -LiteralPath $latestPath -Raw | ConvertFrom-Json
     $backend = Get-Content -LiteralPath (Join-Path $latest.DiagnosticsDirectory 'result.json') -Raw | ConvertFrom-Json
     if ($backend.Status -ne 'partial' -or $backend.After.VirtualizedMethods.Count -eq 0) { throw "Fixture must exercise incomplete VM recovery. See $root" }

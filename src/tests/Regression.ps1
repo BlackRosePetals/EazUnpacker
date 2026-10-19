@@ -3,16 +3,17 @@ param(
     [switch]$CheckRepeat,
     [switch]$CheckKeyRejection,
     [switch]$IncludeAva,
-    [string]$ResultRoot = (Join-Path $PSScriptRoot '..\test-results\final-single-file')
+    [string]$ResultRoot = (Join-Path $PSScriptRoot '..\test-results\final-single-file'),
+    [string]$Tool=(Join-Path $PSScriptRoot '..\bin\Release\net48\Unpacker.exe')
 )
 $ErrorActionPreference = 'Stop'
 function Get-WorkReport([string]$outputFile) {
     $sha=[Security.Cryptography.SHA256]::Create()
     try { $key=[BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($outputFile).ToUpperInvariant()))).Replace('-','').ToLowerInvariant() }
     finally { $sha.Dispose() }
-    return Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) ('Unpacker\work\'+$key+'\latest.json')
+    return Join-Path (Split-Path $exe) ('temp\work\'+$key+'\latest.json')
 }
-$exe = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\bin\Release\net48\Unpacker.exe'))
+$exe = [IO.Path]::GetFullPath($Tool)
 if (!(Test-Path -LiteralPath $exe)) { throw 'Unpacker.exe 尚未构建' }
 $resultRoot = [IO.Path]::GetFullPath($ResultRoot)
 New-Item -ItemType Directory -Path $resultRoot -Force | Out-Null
@@ -32,7 +33,7 @@ foreach ($sample in $samples) {
     $outputFile = Join-Path (Join-Path $resultRoot $sample.Name) $sample.Output
     & $exe analyzer $inputFile | Set-Content -LiteralPath (Join-Path $resultRoot ($sample.Name+'.analysis.json')) -Encoding UTF8
     if ($LASTEXITCODE -ne 0) { throw ('静态分析失败：'+$sample.Name) }
-    & $exe unpack $inputFile $outputFile --export-source
+    & $exe unpack $inputFile $outputFile --export-source --validate-clr
     if ($LASTEXITCODE -ne 0) { throw ('完整恢复或 C# 重构建失败：'+$sample.Name) }
     $item = Get-Content -LiteralPath (Get-WorkReport $outputFile) -Raw | ConvertFrom-Json
     $expectedFiles=if($item.RuntimeConfig){2}else{1}
@@ -155,7 +156,7 @@ if ($CheckRepeat) {
     foreach ($original in @($reports | Where-Object { $_.Input -eq $gg.Input -or $_.After.ModernRuntime })) {
     $previousHash=(Get-FileHash -LiteralPath $original.Output -Algorithm SHA256).Hash
     $previousProject=$original.SourceProject
-    & $exe unpack $original.Input $original.Output --export-source
+    & $exe unpack $original.Input $original.Output --export-source --validate-clr
     if ($LASTEXITCODE -ne 0) { throw '相同输出文件重复运行失败' }
     $repeat=Get-Content -LiteralPath (Get-WorkReport $original.Output) -Raw | ConvertFrom-Json
     if ((Get-FileHash -LiteralPath $original.Output -Algorithm SHA256).Hash -ne $previousHash -or $repeat.SourceProject -eq $previousProject -or !(Test-Path -LiteralPath $previousProject) -or
