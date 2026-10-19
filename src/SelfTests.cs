@@ -51,6 +51,13 @@ internal static class SelfTests
             var bad = BuildBundle("ok.dll", false); Array.Copy(BitConverter.GetBytes(long.MaxValue), 0, bad, 0, 8);
             try { BundleExtractor.IsBundle(bad, out _); throw new Exception("Accepted bad header offset"); }
             catch (InvalidDataException) { }
+            using (var managed = new dnlib.DotNet.ModuleDefUser("ManagedMarker.dll") { Kind = dnlib.DotNet.ModuleKind.Dll })
+            {
+                managed.Resources.Add(new dnlib.DotNet.EmbeddedResource("marker", bad));
+                using var image = new MemoryStream();
+                managed.Write(image);
+                if (BundleExtractor.IsBundle(image.ToArray(), out _)) throw new Exception("Managed resource marker mistaken for a bundle.");
+            }
             Console.WriteLine("PASS: uncompressed/compressed bundle, traversal, absolute path, truncation, offset bounds."); return 0;
         }
         finally { Directory.Delete(root, true); }

@@ -8,6 +8,16 @@ internal static class BundleExtractor
 
     internal static bool IsBundle(byte[] bytes, out long header)
     {
+        header = 0;
+        // A single-file apphost is native. Managed assemblies can contain the
+        // marker as ordinary data (including tools that inspect bundles).
+        // Do not interpret that data's preceding bytes as an apphost pointer.
+        if (bytes.Length >= 2 && bytes[0] == 0x4d && bytes[1] == 0x5a)
+        {
+            using var pe = new dnlib.PE.PEImage(bytes);
+            var clr = pe.ImageNTHeaders.OptionalHeader.DataDirectories[14];
+            if (clr.VirtualAddress != 0 && clr.Size >= 0x48) return false;
+        }
         for (int i = 8; i <= bytes.Length - Signature.Length; i++)
         {
             if (bytes[i] != Signature[0]) continue;
