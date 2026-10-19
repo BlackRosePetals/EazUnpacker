@@ -17,7 +17,7 @@ internal sealed class CliProgress : IDisposable
     private long stageStarted,lastWritten;
     private string current="准备工作后端";
     private bool disposed;
-    internal CliProgress(string directory,TextWriter? output=null,int heartbeatMilliseconds=5000)
+    internal CliProgress(string directory,TextWriter? output=null,int heartbeatMilliseconds=10000)
     {
         console=output??Console.Out;
         human=new StreamWriter(Path.Combine(directory,"progress.log"),false,new System.Text.UTF8Encoding(false)){AutoFlush=true};
@@ -52,8 +52,8 @@ internal sealed class CliProgress : IDisposable
     private void Write(string state,string message)
     {
         string safe=message.Replace('\r',' ').Replace('\n',' ').Replace('\u001b',' ');
-        string line="["+DateTime.Now.ToString("HH:mm:ss")+"] ["+stage+"/8 "+Names[stage]+"] ["+state+"] "+safe
-            +"  | 阶段 "+((elapsed.ElapsedMilliseconds-stageStarted)/1000.0).ToString("F1",CultureInfo.InvariantCulture)+"s / 总耗时 "+elapsed.Elapsed.TotalSeconds.ToString("F1",CultureInfo.InvariantCulture)+"s";
+        string timing=state is "完成" or "失败" or "等待"?"  | 总耗时 "+elapsed.Elapsed.TotalSeconds.ToString("F1",CultureInfo.InvariantCulture)+"s":"";
+        string line="["+DateTime.Now.ToString("HH:mm:ss")+"] ["+stage+"/8 "+Names[stage]+"] ["+state+"] "+safe+timing;
         human.WriteLine(line);console.WriteLine(line);console.Flush();lastWritten=elapsed.ElapsedMilliseconds;
     }
     public void Dispose(){lock(gate){if(disposed)return;disposed=true;timer.Dispose();human.Dispose();events.Dispose();}}

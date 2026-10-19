@@ -6,7 +6,7 @@ namespace Unpacker;
 
 internal static class Program
 {
-    private const string Usage="用法：Unpacker unpack <输入EXE/DLL> <输出文件> [--export-source]\n      Unpacker analyzer <输入EXE/DLL>\n默认只输出 unpacked 程序；--export-source 另行导出并重构建 C# 工程。";
+    private const string Usage="用法：Unpacker unpack <输入EXE/DLL> <输出文件> [--export-source] [--validate-clr]\n      Unpacker analyzer <输入EXE/DLL>\n默认不检查 CLR；--validate-clr 显式开启；--export-source 导出并重构建 C# 工程。";
 
     [STAThread]
     private static int Main(string[] args)
@@ -15,13 +15,15 @@ internal static class Program
         CliProgress? progress=null;
         try
         {
+            WorkCache.Initialize();
             if (args.Length == 2 && args[0] == "analyzer") return Analyzer.Run(args[1]);
             if (args.Length == 0 || args[0] != "unpack") throw new ArgumentException(Usage);
-            bool exportSource=false;
+            bool exportSource=false,validateClr=false;
             var paths=new List<string>();
             foreach(string argument in args.Skip(1))
             {
                 if(argument=="--export-source" && !exportSource)exportSource=true;
+                else if(argument=="--validate-clr" && !validateClr)validateClr=true;
                 else if(argument.StartsWith("--",StringComparison.Ordinal))throw new ArgumentException("未知或重复的选项："+argument+"\n"+Usage);
                 else paths.Add(argument);
             }
@@ -40,7 +42,7 @@ internal static class Program
             progress.Report(1,"start","开始恢复："+input);
             progress.Report(1,"info","目标文件："+output);
             progress.Report(1,"info","实时日志/诊断目录："+run);
-            int code=ProcessRunner.Run(worker,new[]{"pipeline",input,run,"False","False","600"},Path.Combine(run,"worker.log"),600,progress.Report);
+            int code=ProcessRunner.Run(worker,new[]{"pipeline",input,run,"False","False","600",validateClr.ToString()},Path.Combine(run,"worker.log"),600,progress.Report);
             var result=File.Exists(Path.Combine(run,"result.json")) ? JsonConvert.DeserializeObject<SampleResult>(File.ReadAllText(Path.Combine(run,"result.json")))!
                 : new SampleResult{Input=input,Status="failed",Stages=new(){new StageResult{Name="Worker",Status="failed",Detail="Worker exit "+code}}};
             result.DiagnosticsDirectory=run;
@@ -121,7 +123,7 @@ internal static class Program
                 var build=JObject.Parse(File.ReadAllText(Path.Combine(run,"source-build.json")));
                 result.RebuiltAssembly=(string?)build["RebuiltAssembly"]??"";
                 string vmReport=Path.Combine(run,"vm-methods.json");
-                if(File.Exists(vmReport))
+                if(validateClr && File.Exists(vmReport))
                 {
                     int rebuiltCode;
                     string detail;
@@ -131,12 +133,13 @@ internal static class Program
                         progress.Report(7,"start","映射重编译后的 VM/异步方法并进行 CLR 检查");
                         int mappedCount=RebuiltValidation.MapMethods(recovered,result.RebuiltAssembly,vmReport,mapped);
                         string rebuiltReport=Path.Combine(run,"rebuilt-clr-validation.json");
-                        rebuiltCode=ProcessRunner.Run(worker,new[]{"--validate-worker",result.RebuiltAssembly,mapped,rebuiltReport,"7"},Path.Combine(run,"rebuilt-clr-validation.log"),150,progress.Report);
+                        string validator=result.After.ModernRuntime?Path.Combine(Path.GetDirectoryName(worker)!,"modern","Unpacker.ModernWorker.exe"):worker;
+                        if(!File.Exists(validator))throw new FileNotFoundException("CLR validation backend missing.",validator);
+                        rebuiltCode=ProcessRunner.Run(validator,new[]{"--validate-worker",result.RebuiltAssembly,mapped,rebuiltReport,"7",input},Path.Combine(run,"rebuilt-clr-validation.log"),150,progress.Report);
                         if(rebuiltCode==0)
                         {
                             if(!File.Exists(rebuiltReport))throw new InvalidDataException("Rebuilt CLR worker exited without a validation report.");
-                            var validation=JObject.Parse(File.ReadAllText(rebuiltReport));
-                            if((int?)validation["Prepared"]!=mappedCount || (int?)validation["Failed"]!=0 || (int?)validation["Skipped"]!=0)
+                            if(!ClrValidator.HasCompleteReport(rebuiltReport,mappedCount))
                                 throw new InvalidDataException("Rebuilt CLR validation counts do not match recovered VM methods.");
                         }
                         detail="Mapped "+mappedCount+" recovered VM methods by signature; isolated rebuilt CLR compilation exit "+rebuiltCode+".";
@@ -154,6 +157,7 @@ internal static class Program
             }
             bool complete=recoveryComplete && !result.Stages.Any(s=>s.Status is "failed" or "skipped" or "partial");
             result.Output=output;result.Status=complete?"complete":"partial";
+            foreach(string summary in RecoveryStatistics.Save(result,run))progress.Report(8,"info",summary);
             File.WriteAllText(Path.Combine(root,"latest.json"),JsonConvert.SerializeObject(result,Formatting.Indented));
             progress.Report(8,complete?"success":"warning",(complete?"输出：":"部分完成，已输出：")+output);
             if(exportSource)
@@ -175,11 +179,26 @@ internal static class Program
         try
         {
             File.Copy(candidate,pending);
+            string previousPdb=Path.ChangeExtension(output,".pdb");
+            if(File.Exists(Path.ChangeExtension(candidate,".pdb"))&&File.Exists(output)&&File.Exists(previousPdb))
+            {
+                // Retire this output's matching legacy alias before replacing
+                // the old DLL/PDB pair with different deterministic symbols.
+                try {PortablePdbCompatibility.PublishSidecar(output,previousPdb);}
+                catch(BadImageFormatException){} // An arbitrary prior output may not be a managed PE.
+            }
             for(int attempt=0;;attempt++)
             {
                 try {if(File.Exists(output))File.Replace(pending,output,null);else File.Move(pending,output);break;}
                 catch(IOException ex) when(attempt<4 && (ex.HResult&0xffff) is 32 or 33 or 1175)
                 {System.Threading.Thread.Sleep(150<<attempt);}
+            }
+            string pdb=Path.ChangeExtension(candidate,".pdb");
+            if(Path.GetExtension(candidate).ToLowerInvariant() is ".dll" or ".exe" && File.Exists(pdb))
+            {
+                string publishedPdb=Path.ChangeExtension(output,".pdb");
+                File.Copy(pdb,publishedPdb,true);
+                PortablePdbCompatibility.PublishSidecar(output,publishedPdb);
             }
         }
         finally {if(File.Exists(pending))File.Delete(pending);}

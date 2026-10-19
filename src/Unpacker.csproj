@@ -2,14 +2,13 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType><TargetFramework>net48</TargetFramework>
     <LangVersion>latest</LangVersion><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>Unpacker</AssemblyName><Version>1.0.1</Version>
+    <AssemblyName>Unpacker</AssemblyName>
     <ShouldUnsetParentConfigurationAndPlatform>false</ShouldUnsetParentConfigurationAndPlatform>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ProjectReference><AdditionalProperties>ShouldUnsetParentConfigurationAndPlatform=false</AdditionalProperties></ProjectReference>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <Content Include="vm-key-profiles.txt" Condition="Exists('vm-key-profiles.txt')" CopyToOutputDirectory="PreserveNewest" />
     <Compile Remove="ThirdParty\**;ModernWorker\**;WorkerHost\**;tests\**;test-results\**" />
     <EmbeddedResource Remove="test-results\**;tests\**" />
     <ProjectReference Include="ThirdParty\EazFixer\EazFixer.Engine.csproj" />
@@ -18,9 +17,12 @@
     <PackageReference Include="ICSharpCode.Decompiler" Version="11.1.0.9782" />
     <PackageReference Include="System.Memory" Version="4.6.3" />
     <ProjectReference Include="WorkerHost\Unpacker.Worker.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="ModernWorker\ModernWorker.csproj" ReferenceOutputAssembly="false" SkipGetTargetFrameworkProperties="true" />
   </ItemGroup>
   <Target Name="CopyWorkerRuntime" AfterTargets="Build">
     <ItemGroup><WorkerRuntime Include="WorkerHost\bin\$(Configuration)\net48\*.*" /></ItemGroup>
     <Copy SourceFiles="@(WorkerRuntime)" DestinationFolder="$(OutputPath)worker" />
+    <ItemGroup><ModernRuntime Include="ModernWorker\bin\$(Configuration)\net8.0-windows\**\*.*" /></ItemGroup>
+    <Copy SourceFiles="@(ModernRuntime)" DestinationFiles="@(ModernRuntime->'$(OutputPath)worker\modern\%(RecursiveDir)%(Filename)%(Extension)')" />
   </Target>
 </Project>

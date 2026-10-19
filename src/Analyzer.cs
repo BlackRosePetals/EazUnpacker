@@ -10,7 +10,7 @@ internal static class Analyzer
     {
         input=Path.GetFullPath(input);
         byte[] bytes=File.ReadAllBytes(input);
-        string temporary=Path.Combine(Path.GetTempPath(),"unpacker-analysis-"+Guid.NewGuid().ToString("N"));
+        string temporary=WorkCache.CreateTemporary("analysis");
         try
         {
             bool bundle=BundleExtractor.IsBundle(bytes,out long header);

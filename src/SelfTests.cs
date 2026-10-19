@@ -6,20 +6,32 @@ internal static class SelfTests
 {
     internal static int Run()
     {
-        string root = Path.Combine(Path.GetTempPath(), "unpacker-tests-" + Guid.NewGuid().ToString("N"));
+        string root = WorkCache.CreateTemporary("tests");
         Directory.CreateDirectory(root);
         try
         {
             EazyDevirt.CipherStreamTests.Run();
             EazyDevirt.VmRecoveryTests.Run();
+            EazFixer.FixerCompatibilityTests.Run();
             CheckRecoveryCheckpoint(root);
+            ValidationReportTests.Run(root);
+            RecoveryStatisticsTests.Run(root);
+            WorkCacheTests.Run();
+            InlineControlFlowTests.Run(root);
+            CosturaDependencyTests.Run(root);
+            PortablePdbCompatibilityTests.Run(root);
+            AssemblyInspectorTests.Run(root);
             CheckControlFlow();
             ControlFlowCleanupTests.Run(root);
+            ControlFlowGarbageTests.Run(root);
             SourceCompatibilityTests.Run(root);
             SafeReadabilityTests.Run(root);
+            SafeProxyPassTests.Run(root);
             RuntimeCompatibilityTests.Run(root);
             CheckRebuiltMapping(root);
             NamingTests.Run(root);
+            GenericReadabilityTests.Run(root);
+            NameRecoveryContractTests.Run(root);
             AsyncRecoveryTests.Run(root);
             ProgressTests.Run(root);
             if(!WorkerDesktop.CurrentName.StartsWith("Unpacker-",StringComparison.Ordinal))throw new Exception("Worker is on the interactive desktop.");

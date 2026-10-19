@@ -63,7 +63,11 @@ internal static class AsyncRecoveryTests
         if(wrapped!=2)throw new Exception("Missing builder fixture call sites.");
         Assembly Snapshot(string suffix){module.Assembly.Name="UnpackAsyncFixture"+suffix;using var bytes=new MemoryStream();module.Write(bytes);File.WriteAllBytes(Path.Combine(directory,"async-"+suffix+".dll"),bytes.ToArray());return Assembly.Load(bytes.ToArray());}
         var before=Snapshot("Before");
+        var moveBody=state.Methods.Single(m=>m.Name=="MoveNext").Body;
+        ushort previousMaxStack=moveBody.MaxStack;
+        moveBody.KeepOldMaxStack=true;
         if(AsyncRecoveryPass.Process(module,Path.Combine(directory,"async-fixture.json"))!=2)throw new Exception("Async proxy recovery count mismatch.");
+        if(moveBody.MaxStack!=previousMaxStack+1)throw new Exception("Inlined await forwarding did not increase the preserved caller stack bound.");
         state.Name="RegeneratedStateMachine";
         var attribute=kickoff.CustomAttributes.Single(a=>a.TypeFullName=="System.Runtime.CompilerServices.AsyncStateMachineAttribute");
         int attributeIndex=kickoff.CustomAttributes.IndexOf(attribute);

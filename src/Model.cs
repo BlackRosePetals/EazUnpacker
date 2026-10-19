@@ -18,6 +18,7 @@ internal sealed class SampleResult
     public string RebuiltAssembly { get; set; } = "";
     public string DiagnosticsDirectory { get; set; } = "";
     public string Status { get; set; } = "failed";
+    public bool ClrValidationRequested {get;set;}
     public string Sha256 { get; set; } = "";
     public List<StageResult> Stages { get; set; } = new();
     public AssemblyInfo? Before { get; set; }

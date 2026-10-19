@@ -23,6 +23,15 @@ internal static class ProgressTests
         if(!raw.Contains("raw fixture stdout") || !raw.Contains("raw fixture stderr") || !raw.Contains("{malformed}")
             || File.ReadAllText(outer).Contains("raw fixture stdout"))throw new Exception("Raw backend log/relay policy changed.");
         Console.WriteLine("PASS: nested UTF-8 progress arrives before child exit; stdout/stderr retained on disk without raw console flooding.");
+        string modern=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"modern","Unpacker.ModernWorker.exe");
+        if(File.Exists(modern))
+        {
+            var messages=new List<ProgressEvent>();
+            code=ProcessRunner.Run(modern,new[]{"--test-progress"},Path.Combine(root,"modern-utf8.log"),15,messages.Add);
+            if(code!=0||messages.Count!=1||!messages[0].Message.Contains("[密钥]")||!messages[0].Message.Contains("区域 2")||messages[0].Message.Contains('\ufffd'))
+                throw new Exception("Modern worker Chinese key progress was corrupted in the UTF-8 pipe.");
+            Console.WriteLine("PASS: modern-worker Chinese key messages survive the real UTF-8 progress pipe.");
+        }
         var failure=new List<ProgressEvent>();
         code=ProcessRunner.Run(System.Reflection.Assembly.GetExecutingAssembly().Location,new[]{"source",Path.Combine(root,"missing.dll"),Path.Combine(root,"missing-source"),Path.Combine(root,"missing-report.json"),Path.Combine(root,"missing.dll")},
             Path.Combine(root,"progress-failure.log"),10,failure.Add);

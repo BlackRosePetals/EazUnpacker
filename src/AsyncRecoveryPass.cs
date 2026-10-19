@@ -44,6 +44,7 @@ internal static class AsyncRecoveryPass
                     changes.Add(new{Caller=caller.FullName,Stub=stub.FullName,Kind="builder.Start",Evidence="Exact self-builder ref forwarding; redundant stack pop removed"});
                 }
                 else if(stub.MethodSig.Params.Count==2 && stub.MethodSig.Params.All(p=>p is ByRefSig)
+                    && caller.Body.MaxStack<ushort.MaxValue
                     && body.Length==6 && Arg(body[0],1) && body[1].OpCode.Code==Code.Ldflda && Arg(body[2],0) && Arg(body[3],1)
                     && BuilderCall(body[4],"AwaitUnsafeOnCompleted",states,out var awaitCall) && body[5].OpCode.Code==Code.Ret
                     && i>=2 && IsRefLoad(il[i-2]) && IsRefLoad(il[i-1]) && !boundaries.Contains(il[i-1]) && !boundaries.Contains(il[i]))
@@ -56,6 +57,11 @@ internal static class AsyncRecoveryPass
                     il.Insert(i-1,Instruction.Create(OpCodes.Ldflda,(IField)field));
                     il.Insert(i,awaiterLoad);i+=2;
                     il[i].Operand=awaitCall;
+                    // Inlining this forwarding stub exposes the builder reference
+                    // on the caller's evaluation stack: its peak can grow by one.
+                    // Keep the serialized bound valid even when a preceding flow
+                    // pass intentionally preserves max-stack for complex CFGs.
+                    caller.Body.MaxStack++;
                     changes.Add(new{Caller=caller.FullName,Stub=stub.FullName,Kind="builder.AwaitUnsafeOnCompleted",Evidence="Exact ref-only builder forwarding; argument evaluation is side-effect free"});
                 }
             }

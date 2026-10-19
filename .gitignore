@@ -17,6 +17,8 @@ TestResults/
 *.tmp
 *.bak
 *.cache
+# Program-local temporary files
+temp/
 # Local inputs and outputs
 samples/
 样本/

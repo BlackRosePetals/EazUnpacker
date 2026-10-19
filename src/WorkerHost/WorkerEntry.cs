@@ -19,10 +19,11 @@ internal static class WorkerEntry
         Console.OutputEncoding=System.Text.Encoding.UTF8;
         try
         {
+            WorkCache.Initialize();
             switch(args[0])
             {
                 case "pipeline": return RecoveryPipeline.Run(args);
-                case "--validate-worker": return ClrValidator.Run(args[1],args[2],args[3],args.Length>4?int.Parse(args[4]):5);
+                case "--validate-worker": return ClrValidator.Run(args[1],args[2],args[3],args.Length>4?int.Parse(args[4]):5,args.Length>5?args[5]:null);
                 case "--vm-worker":
                     ProgressEvents.Send(3,"info","加载 VM 还原后端");
                     var vmProgress=new ProgressEvents.Counter(3);
@@ -43,6 +44,8 @@ internal static class WorkerEntry
                 case "--map-worker": RebuiltValidation.MapMethods(args[1],args[2],args[3],args[4]);return 0;
                 case "--flow-worker": ControlFlowCleanupPass.Process(args[1],args[2],args[3]);return 0;
                 case "--self-test": return SelfTests.Run();
+                case "--publish-symbols": PortablePdbCompatibility.PublishSidecar(args[1],args[2]);return 0;
+                case "--repair-symbols": PortablePdbCompatibility.Normalize(args[1],args[2]);PortablePdbCompatibility.PublishSidecar(args[1],args[2]);return 0;
                 case "--desktop-probe": Console.WriteLine("Desktop: "+WorkerDesktop.CurrentName);return 0;
                 case "--test-sleep": System.Threading.Thread.Sleep(30000);return 0;
                 case "--test-progress":

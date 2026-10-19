@@ -151,27 +151,7 @@ internal static class SourceCompiler
     }
 
     internal static string[] DependencyDirectories(string assembly,string originalInput)
-    {
-        string originalDirectory=Path.GetDirectoryName(Path.GetFullPath(originalInput))!;
-        var directories=new List<string>{Path.GetDirectoryName(Path.GetFullPath(assembly))!,originalDirectory};
-        string config=originalInput+".config";
-        if(File.Exists(config))
-        {
-            // Read data only; do not activate AppDomain managers or config extensions.
-            var settings=new System.Xml.XmlReaderSettings {DtdProcessing=System.Xml.DtdProcessing.Prohibit,XmlResolver=null};
-            using var reader=System.Xml.XmlReader.Create(config,settings);
-            var xml=XDocument.Load(reader);
-            XNamespace ns="urn:schemas-microsoft-com:asm.v1";
-            foreach(string path in xml.Descendants(ns+"probing").SelectMany(p=>((string?)p.Attribute("privatePath")??"").Split(';')))
-            {
-                if(string.IsNullOrWhiteSpace(path) || Path.IsPathRooted(path))continue;
-                string directory=Path.GetFullPath(Path.Combine(originalDirectory,path.Trim()));
-                if(directory.StartsWith(originalDirectory.TrimEnd(Path.DirectorySeparatorChar)+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase)
-                    && Directory.Exists(directory))directories.Add(directory);
-            }
-        }
-        return directories.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-    }
+        =>DependencyLoadScope.DependencyDirectories(assembly,originalInput);
 
     private sealed class DecompilerProgress : IProgress<DecompilationProgress>
     {

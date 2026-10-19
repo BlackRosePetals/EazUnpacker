@@ -41,6 +41,7 @@ internal static class NameRecoveryPass
         var types = module.GetTypes().Where(t => !t.IsGlobalModuleType).ToArray();
         var changes = new List<NameChange>();
         SafeProxyPass.Process(module,Path.Combine(Path.GetDirectoryName(mapPath)!,"safe-proxies.json"));
+        InlineExpressionPass.Process(module,Path.Combine(Path.GetDirectoryName(mapPath)!,"inline-expressions.json"));
         // Fold literal conditional branches before per-method PDB scopes are
         // materialized, so a folded-away first instruction cannot leave a stale
         // scope start. This shares the single final write below, which keeps the
@@ -126,8 +127,17 @@ internal static class NameRecoveryPass
                 ? (IMemberDef?)p.Type!.Fields.FirstOrDefault(f => f.Name == p.Argument.Name)
                 : p.Type!.Properties.FirstOrDefault(f => f.Name == p.Argument.Name))).Where(p => p.Member != null).ToArray();
         var namespaces = new Dictionary<string,string>();
+        // Large vendor assemblies have tens of thousands of top-level types.
+        // Re-enumerating all their names for each rename is quadratic. Reserve
+        // each scope once; generated legal names can never reuse an obfuscated
+        // original name, so retaining the old reservations is conservative.
+        var topLevelNames=module.Types.GroupBy(t=>t.Namespace.String)
+            .ToDictionary(g=>g.Key,g=>new HashSet<string>(g.Select(t=>t.Name.String)));
+        var nestedNames=types.Where(t=>t.DeclaringType!=null).GroupBy(t=>t.DeclaringType)
+            .ToDictionary(g=>g.Key,g=>new HashSet<string>(g.Select(t=>t.Name.String)));
         var groups = BuildMethodGroups(types);
         var methodGroups=groups.SelectMany(g=>g.Select(m=>(Method:m,Group:g))).ToDictionary(p=>p.Method,p=>p.Group);
+        var propertyNames=BuildPropertyContractNames(types,methodGroups,originalProperties);
         foreach (var type in types)
         {
             if(type.IsNested && !type.IsNestedPublic)
@@ -135,13 +145,19 @@ internal static class NameRecoveryPass
             if(type.IsSealed && !type.IsValueType && type.BaseType?.FullName!="System.MulticastDelegate" && type.Methods.Any(m=>m.IsVirtual && m.IsNewSlot && m.Overrides.Count==0))
             {Add(changes,"TypeModifier",type,"sealed","unsealed");type.IsSealed=false;}
             string original = type.Name.String;
-            if (NeedsName(original, true))
+            bool entryType=module.EntryPoint?.DeclaringType==type;
+            if (entryType || NeedsName(original, true) || IsGeneratedTypeName(original))
             {
                 string suffix = type.GenericParameters.Count>0?"`"+type.GenericParameters.Count:Regex.Match(original, @"`\d+$").Value;
                 var hint=hints.Get(type);
-                type.Name = Unique((hint?.Name??TypePrefix(type)+type.MDToken.Rid.ToString(CultureInfo.InvariantCulture))+suffix,
-                    type.DeclaringType?.NestedTypes.Where(t => t != type).Select(t => t.Name.String) ?? module.Types.Where(t => t != type).Select(t => t.Name.String));
-                Add(changes, "Type", type, originalTypes[type], type.FullName,evidence:hint?.Evidence??"base-type/category numbered fallback; original-name-unavailable");
+                var used=type.DeclaringType==null?topLevelNames[type.Namespace.String]:nestedNames[type.DeclaringType];
+                string? inherited=BaseTypeStem(type);
+                string stem=entryType?"Program":hint?.Name??inherited??TypePrefix(type)+type.MDToken.Rid.ToString(CultureInfo.InvariantCulture);
+                used.Remove(original);
+                string proposed=stem+suffix;int collision=2;
+                while(!used.Add(proposed))proposed=stem+collision++.ToString(CultureInfo.InvariantCulture)+suffix;
+                type.Name=proposed;
+                if(original!=proposed)Add(changes, "Type", type, originalTypes[type], type.FullName,evidence:entryType?"CLI entry-point declaring type; generated-role":hint?.Evidence??(inherited!=null?"declared base-type name; generated-role":"category numbered fallback; original-name-unavailable"));
             }
             if (type.DeclaringType == null && type.Namespace.String.Split('.').Any(n => n.Length > 0 && NeedsName(n)))
             {
@@ -197,11 +213,7 @@ internal static class NameRecoveryPass
                     continue;
                 }
                 if(!NeedsName(property.Name))continue;
-                var accessor=property.GetMethod??property.SetMethod;
-                var related=accessor==null?new List<MethodDef>():methodGroups[accessor];
-                string? contractName=types.SelectMany(t=>t.Properties).Where(p=>p.GetMethods.Concat(p.SetMethods).Any(related.Contains))
-                    .Select(p=>originalProperties[p]).FirstOrDefault(n=>!NeedsName(n));
-                string name = contractName ?? (property.PropertySig.Params.Count > 0 ? "Item" : "Property" + (related.Count>0?related.Min(m=>m.MDToken.Rid):property.MDToken.Rid).ToString("X4"));
+                string name = propertyNames[property];
                 Add(changes, "Property", property, originalProperties[property], name, property.PropertySig.RetType.FullName); property.Name = name;
                 RenameAccessor(property.GetMethod, "get_"+name); RenameAccessor(property.SetMethod, "set_"+name);
             }
@@ -220,13 +232,28 @@ internal static class NameRecoveryPass
             foreach (var method in type.Methods)
             {
                 foreach (var generic in method.GenericParameters) RenameGeneric(generic, changes);
+                var indexer=type.Properties.FirstOrDefault(p=>p.PropertySig.Params.Count>0&&(p.GetMethods.Contains(method)||p.SetMethods.Contains(method)));
+                int indexCount=indexer?.PropertySig.Params.Count??0;
+                bool indexSetter=indexer?.SetMethods.Contains(method)==true;
+                bool NeedsParameterRename(Parameter p)=>NeedsParameterName(p.Name)
+                    || (indexer!=null&&p.MethodSigIndex<indexCount&&p.Name=="value")
+                    || (indexSetter&&p.MethodSigIndex==indexCount&&p.Name!="value");
+                var usedParameters=new HashSet<string>(method.Parameters.Where(p=>!p.IsHiddenThisParameter&&!p.IsReturnTypeParameter
+                    && !NeedsParameterRename(p)).Select(p=>p.Name));
+                if(indexer!=null)usedParameters.Add("value"); // implicit C# setter argument
                 foreach (var parameter in method.Parameters.Where(p => !p.IsHiddenThisParameter && !p.IsReturnTypeParameter))
                 {
-                    if (!NeedsName(parameter.Name)) continue;
+                    if (!NeedsParameterRename(parameter)) continue;
                     bool eventParameter=hints.EventHandlers.Contains(method) && method.MethodSig.Params.Count==2
                         && method.MethodSig.Params[0].ElementType==ElementType.Object;
                     var parameterHint=hints.Get(parameter);
-                    string name = parameterHint?.Name??(eventParameter?(parameter.MethodSigIndex==0?"sender":"e"):TypeStem(parameter.Type) + "Argument" + parameter.MethodSigIndex);
+                    bool entryArgs=method==module.EntryPoint&&parameter.Type.FullName=="System.String[]";
+                    bool setterValue=indexSetter&&parameter.MethodSigIndex==indexCount;
+                    bool indexArgument=indexer!=null&&parameter.MethodSigIndex<indexCount;
+                    string stem=setterValue?"value":indexArgument?(parameterHint?.Name is { } hint&&hint!="value"?hint:parameter.Type.ElementType==ElementType.String?"key":"index"):
+                        parameterHint?.Name??(entryArgs?"args":eventParameter?(parameter.MethodSigIndex==0?"sender":"e"):ParameterStem(parameter.Type));
+                    string name=stem;int collision=2;
+                    if(!setterValue)while(!usedParameters.Add(name))name=stem+collision++.ToString(CultureInfo.InvariantCulture);
                     parameter.CreateParamDef();
                     var definition = parameter.ParamDef!;
                     Add(changes, "Parameter", method, parameter.Name, name, parameter.Type.FullName,parameterHint?.Evidence??(eventParameter?"event callback signature role":"actual CLR type plus argument index"));
@@ -306,9 +333,16 @@ internal static class NameRecoveryPass
         // Reconstructed property rows cannot preserve their original row order.
         // Portable PDBs cannot reference the resulting PropertyPtr/EventPtr tables.
         AsyncRecoveryPass.Process(module,Path.Combine(Path.GetDirectoryName(mapPath)!,"async-recovery.json"));
+        foreach(var method in module.GetTypes().SelectMany(t=>t.Methods).Where(m=>m.HasBody))
+        {
+            // Async forwarding and string/proxy edits can move even an otherwise
+            // untouched edge out of the short-branch range.
+            method.Body.SimplifyBranches();method.Body.OptimizeBranches();
+        }
         module.Write(output,new ModuleWriterOptions(module) {WritePdb=true,PdbOptions=PdbWriterOptions.Deterministic,
             PdbFileName=Path.ChangeExtension(output,".pdb"),PdbFileNameInDebugDirectory=Path.GetFileName(Path.ChangeExtension(output,".pdb")),
             MetadataOptions={Flags=MetadataFlags.PreserveAll & ~MetadataFlags.PreservePropertyRids & ~MetadataFlags.PreserveEventRids & ~MetadataFlags.PreserveParamRids}});
+        PortablePdbCompatibility.Normalize(output,Path.ChangeExtension(output,".pdb"));
         File.WriteAllText(Path.Combine(Path.GetDirectoryName(mapPath)!,"control-flow-cleanup.json"),JsonConvert.SerializeObject(new{
             FoldedBranches=flowStats.FoldedBranches,RemovedInstructions=flowStats.RemovedInstructions,Methods=flowStats.Methods,
             Preserved="Method/type definitions, metadata tokens, exception-region boundaries, reflection-visible members and every reachable side effect."
@@ -324,9 +358,47 @@ internal static class NameRecoveryPass
         }
     }
 
+    private static Dictionary<PropertyDef,string> BuildPropertyContractNames(TypeDef[] types,
+        Dictionary<MethodDef,List<MethodDef>> methodGroups,Dictionary<PropertyDef,string> originals)
+    {
+        // A getter and setter are separate dispatch slots, but a property is one
+        // naming contract. A setter-only interface or a derived type with only
+        // one reconstructed accessor must not rename that slot independently of
+        // the base property's getter. Join properties through *either* accessor
+        // before changing any names (including across generic base types).
+        var properties=types.SelectMany(t=>t.Properties).ToArray();
+        var parent=properties.ToDictionary(p=>p,p=>p);
+        PropertyDef Find(PropertyDef p)
+        {
+            var root=p;while(parent[root]!=root)root=parent[root];
+            while(parent[p]!=p){var next=parent[p];parent[p]=root;p=next;}
+            return root;
+        }
+        var slots=new Dictionary<List<MethodDef>,PropertyDef>();
+        foreach(var property in properties)
+        foreach(var accessor in property.GetMethods.Concat(property.SetMethods))
+        {
+            var slot=methodGroups[accessor];
+            if(slots.TryGetValue(slot,out var other))parent[Find(property)]=Find(other);
+            else slots.Add(slot,property);
+        }
+        var names=new Dictionary<PropertyDef,string>();
+        foreach(var family in properties.GroupBy(Find))
+        {
+            var members=family.ToArray();
+            string? contract=members.Select(p=>originals[p]).FirstOrDefault(n=>!NeedsName(n));
+            var accessors=members.SelectMany(p=>p.GetMethods.Concat(p.SetMethods)).ToArray();
+            uint rid=accessors.Length==0?members.Min(p=>p.MDToken.Rid):accessors.SelectMany(a=>methodGroups[a]).Min(a=>a.MDToken.Rid);
+            string name=contract??(members.Any(p=>p.PropertySig.Params.Count>0)?"Item":"Property"+rid.ToString("X4"));
+            foreach(var property in members)names.Add(property,name);
+        }
+        return names;
+    }
+
     private static List<List<MethodDef>> BuildMethodGroups(TypeDef[] types)
     {
         var methods=types.SelectMany(t=>t.Methods).ToArray();
+        var ownTypes=new HashSet<TypeDef>(types);
         var parent=methods.ToDictionary(m=>m,m=>m);
         var signatures=new SigComparer(SigComparerOptions.DontCompareTypeScope);
         MethodDef Find(MethodDef m) {while(parent[m]!=m)m=parent[m];return m;}
@@ -339,18 +411,50 @@ internal static class NameRecoveryPass
             for(var baseReference=method.DeclaringType.BaseType;baseReference!=null;)
             {
                 var baseType=baseReference.ResolveTypeDef();
-                if(baseType==null || !types.Contains(baseType))break;
+                if(baseType==null || !ownTypes.Contains(baseType))break;
                 var arguments=(baseReference as TypeSpec)?.TypeSig is GenericInstSig instance?instance.GenericArguments:Array.Empty<TypeSig>();
                 if(!method.IsNewSlot)
                     foreach(var candidate in baseType.Methods.Where(m=>m.IsVirtual && m.Name==method.Name && signatures.Equals(CloseSignature(m.MethodSig,arguments),method.MethodSig)))Join(method,candidate);
                 baseReference=baseType.BaseType==null?null:Substitute(baseType.BaseType.ToTypeSig(),arguments).ToTypeDefOrRef();
             }
-            foreach(var reference in method.DeclaringType.Interfaces.Select(i=>i.Interface))
+        }
+        // The implementing method can live on a base class which never declared
+        // the interface itself. Also visit parent interfaces and close both
+        // signatures in the implementing type's generic context.
+        foreach(var type in types)
+        {
+            var pending=new Queue<ITypeDefOrRef>(type.Interfaces.Select(i=>i.Interface));
+            var visited=new HashSet<string>();
+            while(pending.Count>0)
             {
+                var reference=pending.Dequeue();
+                if(!visited.Add(reference.FullName))continue;
                 var contract=reference.ResolveTypeDef();
-                if(contract==null || !types.Contains(contract))continue;
+                if(contract==null || !ownTypes.Contains(contract))continue;
                 var arguments=(reference as TypeSpec)?.TypeSig is GenericInstSig instance?instance.GenericArguments:Array.Empty<TypeSig>();
-                foreach(var candidate in contract.Methods.Where(m=>m.Name==method.Name && signatures.Equals(CloseSignature(m.MethodSig,arguments),method.MethodSig)))Join(method,candidate);
+                foreach(var inherited in contract.Interfaces)
+                    pending.Enqueue(Substitute(inherited.Interface.ToTypeSig(),arguments).ToTypeDefOrRef());
+                foreach(var declaration in contract.Methods.Where(m=>!m.IsStatic))
+                {
+                    var expected=CloseSignature(declaration.MethodSig,arguments);
+                    TypeDef? owner=type;IList<TypeSig> ownerArguments=Array.Empty<TypeSig>();
+                    while(owner!=null && ownTypes.Contains(owner))
+                    {
+                        // An explicit MethodImpl takes precedence over a
+                        // same-name public method. Joining both would rename a
+                        // distinct overridable slot to the private final slot's
+                        // name, making derived overrides fail CLR type loading.
+                        var explicitImplementation=owner.Methods.FirstOrDefault(m=>m.Overrides.Any(o=>
+                            o.MethodDeclaration.ResolveMethodDef()==declaration));
+                        if(explicitImplementation!=null){Join(explicitImplementation,declaration);break;}
+                        var implementation=owner.Methods.FirstOrDefault(m=>m.IsPublic && !m.IsStatic && m.Name==declaration.Name
+                            && signatures.Equals(CloseSignature(m.MethodSig,ownerArguments),expected));
+                        if(implementation!=null){Join(implementation,declaration);break;}
+                        var baseReference=owner.BaseType==null?null:Substitute(owner.BaseType.ToTypeSig(),ownerArguments).ToTypeDefOrRef();
+                        owner=baseReference?.ResolveTypeDef();
+                        ownerArguments=(baseReference as TypeSpec)?.TypeSig is GenericInstSig baseInstance?baseInstance.GenericArguments:Array.Empty<TypeSig>();
+                    }
+                }
             }
         }
         return methods.GroupBy(Find).Select(g=>g.ToList()).ToList();
@@ -418,9 +522,22 @@ internal static class NameRecoveryPass
 
     private static void RestoreInheritedProperties(TypeDef[] types,List<NameChange> changes)
     {
+        // Index in original property order to preserve the previous first-match
+        // selection without scanning every property for every method group.
+        var accessors=new Dictionary<MethodDef,(PropertyDef Property,int Order)>();
+        int ordinal=0;
+        foreach(var property in types.SelectMany(t=>t.Properties))
+        {
+            foreach(var method in property.GetMethods.Concat(property.SetMethods))
+                if(!accessors.ContainsKey(method))accessors.Add(method,(property,ordinal));
+            ordinal++;
+        }
         foreach(var group in BuildMethodGroups(types))
         {
-            var template=types.SelectMany(t=>t.Properties).FirstOrDefault(p=>p.GetMethods.Concat(p.SetMethods).Any(group.Contains));
+            PropertyDef? template=null;int first=int.MaxValue;
+            foreach(var method in group)
+                if(accessors.TryGetValue(method,out var match) && match.Order<first)
+                {template=match.Property;first=match.Order;}
             if(template==null)continue;
             bool getter=template.GetMethods.Any(group.Contains);
             foreach(var method in group)
@@ -471,6 +588,41 @@ internal static class NameRecoveryPass
     private static void Add(List<NameChange> changes,string kind,IMDTokenProvider member,string? original,string renamed,string type="",string evidence="") =>
         changes.Add(new NameChange{Kind=kind,Token=member.MDToken.ToString(),Original=original??"",Renamed=renamed,Type=type,Evidence=evidence});
     private static string Unique(string name,IEnumerable<string> used) {var set=new HashSet<string>(used);while(set.Contains(name))name+="_";return name;}
+    private static bool IsGeneratedTypeName(string name)=>Regex.IsMatch(name,@"^(?:Class|StaticClass|Struct|Interface|Enum|Delegate)\d+_*(?:`\d+)?$");
+    private static bool NeedsParameterName(string name)=>NeedsName(name)||Regex.IsMatch(name,@"^[A-Za-z_][A-Za-z0-9_]*Argument\d+_*$");
+    private static string? BaseTypeStem(TypeDef type)
+    {
+        if(type.IsInterface||type.IsEnum||type.IsValueType||type.BaseType==null)return null;
+        var seen=new HashSet<string>();ITypeDefOrRef? reference=type.BaseType;
+        while(reference!=null && seen.Add(reference.FullName))
+        {
+            if(reference.FullName is "System.Object" or "System.ValueType" or "System.Enum" or "System.MulticastDelegate" or "System.Delegate")return null;
+            string name=Regex.Replace(reference.Name.String,@"`\d+$","");
+            if(!NeedsName(name)&&!IsGeneratedTypeName(name))
+            {
+                // Avoid a C# self-base spelling when a local type shares the
+                // external base's full name, even though assembly scopes differ.
+                return type.Namespace+"."+name==reference.FullName?name+"2":name;
+            }
+            var definition=reference.ResolveTypeDef();
+            if(definition==null||definition.Module!=type.Module)return null;
+            reference=definition.BaseType;
+        }
+        return null;
+    }
+    private static string ParameterStem(TypeSig type)
+    {
+        type=type.RemovePinnedAndModifiers();if(type is ByRefSig byRef)return ParameterStem(byRef.Next);
+        if(type is SZArraySig or ArraySig)return "items";
+        string? simple=type.ElementType switch {
+            ElementType.Boolean=>"flag",ElementType.String=>"text",ElementType.Object=>"obj",ElementType.Char=>"ch",
+            ElementType.I1 or ElementType.U1 or ElementType.I2 or ElementType.U2 or ElementType.I4 or ElementType.U4 or
+            ElementType.I8 or ElementType.U8 or ElementType.R4 or ElementType.R8 or ElementType.I or ElementType.U=>"value",_=>null};
+        if(simple!=null)return simple;
+        if(type.FullName=="System.Threading.CancellationToken")return "token";
+        string stem=TypeStem(type);if(Regex.IsMatch(stem,@"^(?:class|struct|enum|interface|delegate)\d+$"))return "value";
+        return Keywords.Contains(stem)?"value":stem.Length>24?"value":stem;
+    }
     private static string TypePrefix(TypeDef type) => type.IsInterface?"Interface":type.IsEnum?"Enum":type.IsValueType?"Struct":
         type.BaseType?.FullName=="System.MulticastDelegate"?"Delegate":type.BaseType?.FullName=="System.Windows.Forms.Form"?"Form":type.IsAbstract&&type.IsSealed?"StaticClass":"Class";
     private static string TypeStem(TypeSig type)

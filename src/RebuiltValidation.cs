@@ -27,9 +27,9 @@ internal static class RebuiltValidation
             .GroupBy(m => m.FullName).ToDictionary(g => g.Key, g => g.ToArray());
         var methods = new List<object>();
         int missing = 0;
-        foreach (var entry in JArray.Parse(File.ReadAllText(vmReport)).Where(e => (bool)e["Restored"]!))
+        foreach (var entry in ClrValidator.ReadTargets(vmReport))
         {
-            string originalToken = (string)entry["Token"]!;
+            string originalToken = entry.Token;
             var definition = source.ResolveToken(Convert.ToUInt32(originalToken.Substring(2), 16)) as MethodDef;
             MethodDef? match = null;
             string kind="signature";string? asyncOwner=null;

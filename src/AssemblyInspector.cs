@@ -10,6 +10,14 @@ internal static class AssemblyInspector
         using var module = ModuleDefMD.Load(path);
         var types = module.GetTypes().ToArray();
         var methods = types.SelectMany(t => t.Methods).ToArray();
+        // Eaz has both boxed-result and void executor wrappers. Return type
+        // alone loses real VM methods. Require the runtime's decoded-position
+        // entry point as corroboration instead: an ordinary formatting helper
+        // with (Stream,string,object[]) has no matching void(Stream,long,string).
+        var runtimes=new HashSet<string>(types.Where(t=>t.Methods.Any(m=>m.MethodSig is {Params.Count:3} sig
+            && sig.RetType.ElementType==ElementType.Void && sig.Params[0].FullName=="System.IO.Stream"
+            && sig.Params[1].FullName=="System.Int64" && sig.Params[2].FullName=="System.String"))
+            .Select(t=>t.FullName),StringComparer.Ordinal);
         var result = new AssemblyInfo
         {
             Runtime = module.RuntimeVersion,
@@ -27,12 +35,16 @@ internal static class AssemblyInspector
             result.StringInt32Calls += ins.Count(i => i.Operand is IMethod target && target.MethodSig?.ToString() == "System.String (System.Int32)");
             // Calls into a VM executor use Stream as first argument and either an encoded string or decoded position as second.
             if (ins.Any(i => (i.OpCode.Code == Code.Call || i.OpCode.Code == Code.Callvirt) && i.Operand is IMethod target &&
-                target.MethodSig?.Params.Count >= 2 && target.MethodSig.Params[0].FullName == "System.IO.Stream" &&
-                (target.MethodSig.Params[1].FullName == "System.String" || target.MethodSig.Params[1].FullName == "System.Int64") &&
-                target.MethodSig.Params.Last().FullName == "System.Object[]" &&
-                method.MethodSig?.Params.Any(p => p.FullName == "System.IO.Stream") == false))
+                IsExecutor(target.MethodSig) && target.DeclaringType?.DefinitionAssembly?.FullName==module.Assembly?.FullName &&
+                runtimes.Contains(target.DeclaringType!.FullName) &&
+                !runtimes.Contains(method.DeclaringType.FullName)))
                 result.VirtualizedMethods.Add(method.MDToken.Raw);
         }
         return result;
     }
+
+    private static bool IsExecutor(MethodSig? signature)=>signature?.Params.Count>=3
+        && signature.Params[0].FullName=="System.IO.Stream"
+        && signature.Params[1].FullName is "System.String" or "System.Int64"
+        && signature.Params.Last().FullName=="System.Object[]";
 }
