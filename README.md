@@ -61,14 +61,18 @@ You can also open `Unpacker.slnx`. Output is written to `src\bin\Release\net48`;
 
 ```powershell
 .\src\bin\Release\net48\Unpacker.exe unpack "C:\input.exe" "C:\output.exe"
+# Optional: also export and rebuild the C# project
+.\src\bin\Release\net48\Unpacker.exe unpack "C:\input.exe" "C:\output.exe" --export-source
 .\src\bin\Release\net48\Unpacker.exe analyzer "C:\input.exe"
 ```
 
-For .NET Framework EXE output, deploy the generated `.config` alongside the executable. Exported source, logs and diagnostics are stored in `%LOCALAPPDATA%\Unpacker\work`. The `analyzer` command returns JSON that includes the generated project location when available.
+By default, `unpack` only recovers and publishes the unpacked program; it does not export source, build a string search index, rebuild C#, or validate a rebuilt assembly. Add `--export-source` before or after the input/output paths to enable those additional stages. Source export is disabled by default, not an incomplete/skipped recovery stage.
+
+For .NET Framework EXE output, deploy the generated `.config` alongside the executable. Logs, diagnostics and any explicitly requested source export are stored in `%LOCALAPPDATA%\Unpacker\work`. The `analyzer` command returns JSON that includes the generated project location when available.
 
 Any available recovered assembly is published to the requested output path, including partial recovery results. Incomplete VM recovery, CLR checks, runtime configuration or source rebuilding do not discard an already generated output; diagnostics retain the incomplete status.
 
-Exit codes: `0` for completion of the identified stages, `2` for incomplete recovery or source rebuilding, and `1` for input, command or processing errors.
+Exit codes: `0` for completion of the requested stages, `2` for incomplete recovery (or source rebuilding/validation when `--export-source` is requested), and `1` for input, command or processing errors.
 
 ### Source layout
 
@@ -86,6 +90,8 @@ Exit codes: `0` for completion of the identified stages, `2` for incomplete reco
 ```powershell
 # Built-in tests; no external samples required
 .\src\bin\Release\net48\worker\Unpacker.Worker.exe --self-test
+# CLI source export option regression using a fully supported sample
+.\src\tests\SourceExportOptions.ps1 -InputAssembly "C:\samples\input.exe"
 # Regression tests using a prepared sample directory
 .\src\tests\Regression.ps1 -SampleRoot "C:\samples"
 ```
@@ -125,14 +131,18 @@ dotnet build src/ModernWorker/ModernWorker.csproj -c Release
 
 ```powershell
 .\src\bin\Release\net48\Unpacker.exe unpack "C:\input.exe" "C:\output.exe"
+# 可选：同时导出并重构建 C# 工程
+.\src\bin\Release\net48\Unpacker.exe unpack "C:\input.exe" "C:\output.exe" --export-source
 .\src\bin\Release\net48\Unpacker.exe analyzer "C:\input.exe"
 ```
 
-传统 .NET Framework EXE 输出包含必需的 `.config`，应与程序一起部署。导出的源码、日志与诊断文件保存在 `%LOCALAPPDATA%\Unpacker\work`。`analyzer` 输出 JSON，在生成工程可用时提供其位置。
+`unpack` 默认只恢复并输出 unpacked 程序，不导出源码、不生成字符串搜索索引、不重构建 C#，也不检查重编译产物。在输入/输出路径之前或之后添加 `--export-source` 才会执行这些附加阶段。未开启源码导出不视为恢复不完整或跳过恢复阶段。
+
+传统 .NET Framework EXE 输出包含必需的 `.config`，应与程序一起部署。日志、诊断文件与显式请求导出的源码保存在 `%LOCALAPPDATA%\Unpacker\work`。`analyzer` 输出 JSON，在生成工程可用时提供其位置。
 
 后台只要生成了恢复程序集，就会发布到指定输出路径，包括部分恢复结果。VM 还原、CLR 检查、运行配置或源码重建未完成时，仍保留已生成的输出，并在诊断中记录未完成状态。
 
-退出码：`0` 表示已识别阶段完成，`2` 表示恢复或源码重建不完整，`1` 表示输入、命令或处理错误。
+退出码：`0` 表示请求的阶段完成，`2` 表示恢复不完整，或启用 `--export-source` 后源码重建/验证不完整，`1` 表示输入、命令或处理错误。
 
 ### 源码结构
 
@@ -150,6 +160,8 @@ dotnet build src/ModernWorker/ModernWorker.csproj -c Release
 ```powershell
 # 无需外部样本的内置测试
 .\src\bin\Release\net48\worker\Unpacker.Worker.exe --self-test
+# 使用完全支持的样本验证源码导出选项
+.\src\tests\SourceExportOptions.ps1 -InputAssembly "C:\samples\input.exe"
 # 使用准备好的样本目录运行回归测试
 .\src\tests\Regression.ps1 -SampleRoot "C:\samples"
 ```

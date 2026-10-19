@@ -6,6 +6,8 @@ namespace Unpacker;
 
 internal static class Program
 {
+    private const string Usage="用法：Unpacker unpack <输入EXE/DLL> <输出文件> [--export-source]\n      Unpacker analyzer <输入EXE/DLL>\n默认只输出 unpacked 程序；--export-source 另行导出并重构建 C# 工程。";
+
     [STAThread]
     private static int Main(string[] args)
     {
@@ -14,9 +16,17 @@ internal static class Program
         try
         {
             if (args.Length == 2 && args[0] == "analyzer") return Analyzer.Run(args[1]);
-            if (args.Length != 3 || args[0] != "unpack")
-                throw new ArgumentException("用法：Unpacker unpack <输入EXE/DLL> <输出文件>\n      Unpacker analyzer <输入EXE/DLL>");
-            string input = Path.GetFullPath(args[1]), output = Path.GetFullPath(args[2]);
+            if (args.Length == 0 || args[0] != "unpack") throw new ArgumentException(Usage);
+            bool exportSource=false;
+            var paths=new List<string>();
+            foreach(string argument in args.Skip(1))
+            {
+                if(argument=="--export-source" && !exportSource)exportSource=true;
+                else if(argument.StartsWith("--",StringComparison.Ordinal))throw new ArgumentException("未知或重复的选项："+argument+"\n"+Usage);
+                else paths.Add(argument);
+            }
+            if(paths.Count!=2)throw new ArgumentException(Usage);
+            string input = Path.GetFullPath(paths[0]), output = Path.GetFullPath(paths[1]);
             if (!File.Exists(input)) throw new FileNotFoundException("输入文件不存在。",input);
             if (Directory.Exists(output) || !new[]{".exe",".dll"}.Contains(Path.GetExtension(output),StringComparer.OrdinalIgnoreCase)) throw new ArgumentException("输出必须是 EXE/DLL 文件路径。");
             if (string.Equals(input,output,StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("输出不能覆盖输入原件。");
@@ -53,7 +63,7 @@ internal static class Program
             // Configuration and optional source work must not withhold the file.
             string recovered=result.Output;
             result.After??=AssemblyInspector.Inspect(recovered);
-            progress.Report(5,"info","发布恢复文件（源码重建将单独检查）");
+            progress.Report(5,"info",exportSource?"发布恢复文件（源码重建将单独检查）":"发布恢复文件");
             if(result.After.ModernRuntime && Path.GetExtension(output).Equals(".exe",StringComparison.OrdinalIgnoreCase))
             {
                 string packed=Path.Combine(run,"unpacked.exe");
@@ -89,62 +99,68 @@ internal static class Program
                 progress.Report(5,"warning","DLL 的强名称验证由宿主控制；没有原始私钥时无法重新签出原签名。请在受信任宿主的 EXE.config 配置兼容策略。");
             }
             File.WriteAllText(Path.Combine(root,"latest.json"),JsonConvert.SerializeObject(result,Formatting.Indented));
-            string stringIndex=Path.Combine(run,"string-index");
-            progress.Report(6,"start","建立带模块/方法/资源来源的字符串搜索索引（不替换运行依赖）");
-            int indexCode=ProcessRunner.Run(worker,new[]{"string-index",recovered,input,stringIndex},Path.Combine(run,"string-index.log"),240,progress.Report);
-            result.StringIndex=Path.Combine(stringIndex,"strings.txt");
-            result.Stages.Add(new StageResult{Name="StringSearchIndex",Status=indexCode==0?"success":"partial",Detail="Search-only provenance index exit "+indexCode+"; "+Path.Combine(stringIndex,"index.json")});
-            File.WriteAllText(Path.Combine(root,"latest.json"),JsonConvert.SerializeObject(result,Formatting.Indented));
-            string source=Path.Combine(run,"source");
-            progress.Report(6,"start","导出完整 C# 工程；日志："+Path.Combine(run,"source.log"));
-            int sourceCode=ProcessRunner.Run(worker,new[]{"source",recovered,source,Path.Combine(run,"source-build.json"),input},Path.Combine(run,"source.log"),1200,progress.Report);
-            result.SourceProject=Directory.Exists(source)?Directory.GetFiles(source,"*.csproj").FirstOrDefault()??"":"";
-            result.Stages.Add(new StageResult{Name="SourceBuild",Status=sourceCode==0?"success":"failed",Detail="C# project compilation exit "+sourceCode+"; see "+Path.Combine(run,"source.log")});
-            if(sourceCode!=0)
+            if(exportSource)
             {
-                result.Status="partial";File.WriteAllText(Path.Combine(root,"latest.json"),JsonConvert.SerializeObject(result,Formatting.Indented));
-                progress.Warning("C# 源码导出/构建失败（退出码 "+sourceCode+"）；unpacked 程序已保留："+output+"；查看 "+Path.Combine(run,"source-build.json")+" / "+Path.Combine(run,"source.log"));
-                Console.Error.WriteLine("部分完成："+output+"；C# 源码未通过重新构建，诊断保存在 Unpacker 工作缓存。");return 2;
-            }
-            var build=JObject.Parse(File.ReadAllText(Path.Combine(run,"source-build.json")));
-            result.RebuiltAssembly=(string?)build["RebuiltAssembly"]??"";
-            string vmReport=Path.Combine(run,"vm-methods.json");
-            if(File.Exists(vmReport))
-            {
-                int rebuiltCode;
-                string detail;
-                try
-                {
-                    string mapped=Path.Combine(run,"rebuilt-vm-methods.json");
-                    progress.Report(7,"start","映射重编译后的 VM/异步方法并进行 CLR 检查");
-                    int mappedCount=RebuiltValidation.MapMethods(recovered,result.RebuiltAssembly,vmReport,mapped);
-                    string rebuiltReport=Path.Combine(run,"rebuilt-clr-validation.json");
-                    rebuiltCode=ProcessRunner.Run(worker,new[]{"--validate-worker",result.RebuiltAssembly,mapped,rebuiltReport,"7"},Path.Combine(run,"rebuilt-clr-validation.log"),150,progress.Report);
-                    if(rebuiltCode==0)
-                    {
-                        if(!File.Exists(rebuiltReport))throw new InvalidDataException("Rebuilt CLR worker exited without a validation report.");
-                        var validation=JObject.Parse(File.ReadAllText(rebuiltReport));
-                        if((int?)validation["Prepared"]!=mappedCount || (int?)validation["Failed"]!=0 || (int?)validation["Skipped"]!=0)
-                            throw new InvalidDataException("Rebuilt CLR validation counts do not match recovered VM methods.");
-                    }
-                    detail="Mapped "+mappedCount+" recovered VM methods by signature; isolated rebuilt CLR compilation exit "+rebuiltCode+".";
-                    progress.Report(7,rebuiltCode==0?"success":"error","重编译 CLR 检查退出码 "+rebuiltCode+"；映射 "+mappedCount+" 个方法");
-                }
-                catch(Exception ex) {rebuiltCode=1;detail=ex.ToString();}
-                result.Stages.Add(new StageResult{Name="RebuiltCLRValidation",Status=rebuiltCode==0?"success":"failed",Detail=detail});
-                if(rebuiltCode!=0)
+                string stringIndex=Path.Combine(run,"string-index");
+                progress.Report(6,"start","建立带模块/方法/资源来源的字符串搜索索引（不替换运行依赖）");
+                int indexCode=ProcessRunner.Run(worker,new[]{"string-index",recovered,input,stringIndex},Path.Combine(run,"string-index.log"),240,progress.Report);
+                result.StringIndex=Path.Combine(stringIndex,"strings.txt");
+                result.Stages.Add(new StageResult{Name="StringSearchIndex",Status=indexCode==0?"success":"partial",Detail="Search-only provenance index exit "+indexCode+"; "+Path.Combine(stringIndex,"index.json")});
+                File.WriteAllText(Path.Combine(root,"latest.json"),JsonConvert.SerializeObject(result,Formatting.Indented));
+                string source=Path.Combine(run,"source");
+                progress.Report(6,"start","导出完整 C# 工程；日志："+Path.Combine(run,"source.log"));
+                int sourceCode=ProcessRunner.Run(worker,new[]{"source",recovered,source,Path.Combine(run,"source-build.json"),input},Path.Combine(run,"source.log"),1200,progress.Report);
+                result.SourceProject=Directory.Exists(source)?Directory.GetFiles(source,"*.csproj").FirstOrDefault()??"":"";
+                result.Stages.Add(new StageResult{Name="SourceBuild",Status=sourceCode==0?"success":"failed",Detail="C# project compilation exit "+sourceCode+"; see "+Path.Combine(run,"source.log")});
+                if(sourceCode!=0)
                 {
                     result.Status="partial";File.WriteAllText(Path.Combine(root,"latest.json"),JsonConvert.SerializeObject(result,Formatting.Indented));
-                    progress.Report(7,"warning","重编译 CLR 检查失败；unpacked 程序已保留："+output+"。查看 "+Path.Combine(run,"rebuilt-clr-validation.log"));
-                    Console.Error.WriteLine("C# 重编译产物未通过 CLR 检查；恢复文件已输出："+output);return 2;
+                    progress.Warning("C# 源码导出/构建失败（退出码 "+sourceCode+"）；unpacked 程序已保留："+output+"；查看 "+Path.Combine(run,"source-build.json")+" / "+Path.Combine(run,"source.log"));
+                    Console.Error.WriteLine("部分完成："+output+"；C# 源码未通过重新构建，诊断保存在 Unpacker 工作缓存。");return 2;
+                }
+                var build=JObject.Parse(File.ReadAllText(Path.Combine(run,"source-build.json")));
+                result.RebuiltAssembly=(string?)build["RebuiltAssembly"]??"";
+                string vmReport=Path.Combine(run,"vm-methods.json");
+                if(File.Exists(vmReport))
+                {
+                    int rebuiltCode;
+                    string detail;
+                    try
+                    {
+                        string mapped=Path.Combine(run,"rebuilt-vm-methods.json");
+                        progress.Report(7,"start","映射重编译后的 VM/异步方法并进行 CLR 检查");
+                        int mappedCount=RebuiltValidation.MapMethods(recovered,result.RebuiltAssembly,vmReport,mapped);
+                        string rebuiltReport=Path.Combine(run,"rebuilt-clr-validation.json");
+                        rebuiltCode=ProcessRunner.Run(worker,new[]{"--validate-worker",result.RebuiltAssembly,mapped,rebuiltReport,"7"},Path.Combine(run,"rebuilt-clr-validation.log"),150,progress.Report);
+                        if(rebuiltCode==0)
+                        {
+                            if(!File.Exists(rebuiltReport))throw new InvalidDataException("Rebuilt CLR worker exited without a validation report.");
+                            var validation=JObject.Parse(File.ReadAllText(rebuiltReport));
+                            if((int?)validation["Prepared"]!=mappedCount || (int?)validation["Failed"]!=0 || (int?)validation["Skipped"]!=0)
+                                throw new InvalidDataException("Rebuilt CLR validation counts do not match recovered VM methods.");
+                        }
+                        detail="Mapped "+mappedCount+" recovered VM methods by signature; isolated rebuilt CLR compilation exit "+rebuiltCode+".";
+                        progress.Report(7,rebuiltCode==0?"success":"error","重编译 CLR 检查退出码 "+rebuiltCode+"；映射 "+mappedCount+" 个方法");
+                    }
+                    catch(Exception ex) {rebuiltCode=1;detail=ex.ToString();}
+                    result.Stages.Add(new StageResult{Name="RebuiltCLRValidation",Status=rebuiltCode==0?"success":"failed",Detail=detail});
+                    if(rebuiltCode!=0)
+                    {
+                        result.Status="partial";File.WriteAllText(Path.Combine(root,"latest.json"),JsonConvert.SerializeObject(result,Formatting.Indented));
+                        progress.Report(7,"warning","重编译 CLR 检查失败；unpacked 程序已保留："+output+"。查看 "+Path.Combine(run,"rebuilt-clr-validation.log"));
+                        Console.Error.WriteLine("C# 重编译产物未通过 CLR 检查；恢复文件已输出："+output);return 2;
+                    }
                 }
             }
             bool complete=recoveryComplete && !result.Stages.Any(s=>s.Status is "failed" or "skipped" or "partial");
             result.Output=output;result.Status=complete?"complete":"partial";
             File.WriteAllText(Path.Combine(root,"latest.json"),JsonConvert.SerializeObject(result,Formatting.Indented));
             progress.Report(8,complete?"success":"warning",(complete?"输出：":"部分完成，已输出：")+output);
-            progress.Report(8,"info","源码工程："+result.SourceProject);
-            progress.Report(8,"info","字符串搜索索引："+result.StringIndex);
+            if(exportSource)
+            {
+                progress.Report(8,"info","源码工程："+result.SourceProject);
+                progress.Report(8,"info","字符串搜索索引："+result.StringIndex);
+            }
             progress.Report(8,"info","完整阶段日志："+Path.Combine(run,"progress.log"));
             Console.WriteLine((complete?"完成：":"部分完成：")+output);
             return complete?0:2;

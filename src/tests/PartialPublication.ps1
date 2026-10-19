@@ -50,6 +50,8 @@ foreach ($malformedConfig in @($false, $true)) {
     $backend = Get-Content -LiteralPath (Join-Path $latest.DiagnosticsDirectory 'result.json') -Raw | ConvertFrom-Json
     if ($backend.Status -ne 'partial' -or $backend.After.VirtualizedMethods.Count -eq 0) { throw "Fixture must exercise incomplete VM recovery. See $root" }
     if ($latest.Status -ne 'partial' -or $latest.Output -ne $output -or !($latest.Stages | Where-Object { $_.Name -eq 'Publish' -and $_.Status -eq 'success' })) { throw "Published path or partial status missing. See $root" }
+    if ($latest.SourceProject -or $latest.RebuiltAssembly -or $latest.StringIndex -or
+        ($latest.Stages | Where-Object { $_.Name -in 'StringSearchIndex','SourceBuild','RebuiltCLRValidation' })) { throw "Default partial recovery ran optional source stages. See $root" }
     if ((Get-FileHash -LiteralPath $backend.Output).Hash -ne (Get-FileHash -LiteralPath $output).Hash) { throw "Published output differs from recovered IL. See $root" }
     if ($malformedConfig) {
         if (!($latest.Stages | Where-Object { $_.Name -eq 'RuntimeSignatureCompatibility' -and $_.Status -eq 'failed' })) { throw "Missing configuration failure record. See $root" }

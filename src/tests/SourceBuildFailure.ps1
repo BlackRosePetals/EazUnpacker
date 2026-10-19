@@ -10,7 +10,7 @@ $previous = $env:MSBuildSDKsPath
 try {
     # Break only the optional source compiler, not the recovery worker.
     $env:MSBuildSDKsPath = Join-Path $root 'missing-sdk'
-    & $Tool unpack $InputAssembly $output *> (Join-Path $root 'run.log')
+    & $Tool unpack $InputAssembly $output --export-source *> (Join-Path $root 'run.log')
     $code = $LASTEXITCODE
     if ($code -ne 2 -or !(Test-Path -LiteralPath $output)) { throw "Expected partial exit 2 and published IL; got $code. See $root" }
     if (!(Test-Path -LiteralPath ($output+'.config')) -or ([xml](Get-Content ($output+'.config') -Raw)).configuration.runtime.bypassTrustedAppStrongNames.enabled -ne 'true') { throw "Missing runtime compatibility policy after source failure. See $root" }

@@ -32,7 +32,7 @@ foreach ($sample in $samples) {
     $outputFile = Join-Path (Join-Path $resultRoot $sample.Name) $sample.Output
     & $exe analyzer $inputFile | Set-Content -LiteralPath (Join-Path $resultRoot ($sample.Name+'.analysis.json')) -Encoding UTF8
     if ($LASTEXITCODE -ne 0) { throw ('静态分析失败：'+$sample.Name) }
-    & $exe unpack $inputFile $outputFile
+    & $exe unpack $inputFile $outputFile --export-source
     if ($LASTEXITCODE -ne 0) { throw ('完整恢复或 C# 重构建失败：'+$sample.Name) }
     $item = Get-Content -LiteralPath (Get-WorkReport $outputFile) -Raw | ConvertFrom-Json
     $expectedFiles=if($item.RuntimeConfig){2}else{1}
@@ -155,7 +155,7 @@ if ($CheckRepeat) {
     foreach ($original in @($reports | Where-Object { $_.Input -eq $gg.Input -or $_.After.ModernRuntime })) {
     $previousHash=(Get-FileHash -LiteralPath $original.Output -Algorithm SHA256).Hash
     $previousProject=$original.SourceProject
-    & $exe unpack $original.Input $original.Output
+    & $exe unpack $original.Input $original.Output --export-source
     if ($LASTEXITCODE -ne 0) { throw '相同输出文件重复运行失败' }
     $repeat=Get-Content -LiteralPath (Get-WorkReport $original.Output) -Raw | ConvertFrom-Json
     if ((Get-FileHash -LiteralPath $original.Output -Algorithm SHA256).Hash -ne $previousHash -or $repeat.SourceProject -eq $previousProject -or !(Test-Path -LiteralPath $previousProject) -or
