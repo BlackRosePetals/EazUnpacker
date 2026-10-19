@@ -11,6 +11,49 @@ internal static class KeyExpressionEvaluator
 {
     private sealed record TypeValue(ITypeDescriptor Type);
 
+    // Infer the producer's CLR type without evaluating its receiver or calling
+    // target code. This is a search-order hint, never a substitute for Verify.
+    internal static string? InferKeyType(VMMethod method,int loadIndex)
+    {
+        string? Known(string? name)=>name is "System.String" or "System.Int32" ? name : null;
+        var visited=new HashSet<int>();int budget=4096;
+        string? ReadType(int index,int depth)
+        {
+            if(index<0||index>=method.Instructions.Count||depth>64||!visited.Add(index)||--budget<0)return null;
+            var code=method.Instructions;var instruction=code[index];
+            if(instruction.IsLdcI4())return "System.Int32";
+            if(instruction.OpCode.Code==CilCode.Ldstr)return "System.String";
+            if(instruction.OpCode.Code is CilCode.Call or CilCode.Callvirt && instruction.Operand is IMethodDescriptor called)
+                return Known(called.Signature?.ReturnType.FullName);
+            if(instruction.OpCode.Code is CilCode.Box or CilCode.Unbox_Any or CilCode.Castclass)
+                return Known((instruction.Operand as ITypeDescriptor)?.FullName)??ReadType(index-1,depth+1);
+            if(instruction.OpCode.Code is CilCode.Dup or CilCode.Nop)return ReadType(index-1,depth+1);
+            if(instruction.IsLdloc())
+            {
+                var local=instruction.GetLocalVariable(method.Locals);
+                var declared=Known(local.VariableType.FullName);if(declared!=null)return declared;
+                for(int i=index-1;i>=0&&--budget>=0;i--)
+                    if(code[i].IsStloc()&&code[i].GetLocalVariable(method.Locals)==local)return ReadType(i-1,depth+1);
+            }
+            return null;
+        }
+        try {return ReadType(loadIndex,0);}
+        catch(Exception ex) when(ex is ArgumentOutOfRangeException or IndexOutOfRangeException or InvalidOperationException){return null;}
+    }
+
+    internal static IEnumerable<object> IntrinsicCandidates(VMMethod method)
+    {
+        // PreserveSig COM methods expose an HRESULT, not just small positive
+        // integers. Standard success/error/cancellation outcomes are enabled
+        // by metadata shape, never an application name, token or key profile.
+        bool hresult=method.Instructions.Any(i=>i.OpCode.Code is CilCode.Call or CilCode.Callvirt && i.Operand is IMethodDescriptor called &&
+            called.Resolve() is {PreserveSignature:true} definition && definition.DeclaringType?.IsImport==true &&
+            definition.Signature?.ReturnType.FullName=="System.Int32");
+        if(!hresult)yield break;
+        foreach(uint value in new uint[]{0,1,0x80004001,0x80004002,0x80004003,0x80004004,0x80004005,0x80070005,0x8007000e,0x80070057,0x800704c7})
+            yield return unchecked((int)value);
+    }
+
     internal static IEnumerable<object> Candidates(VMMethod method,int loadIndex)
     {
         var code=method.Instructions;

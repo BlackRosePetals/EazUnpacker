@@ -20,6 +20,9 @@ internal static class LoggingTests
             var number=new VerifiedKeyRecord("0x06000001",2,"Int32",-7,"合成测试").Format();
             var text=new VerifiedKeyRecord("0x06000002",0,"String","line\n\"quoted\"","合成测试").Format();
             if(!number.Contains("-7 (0xFFFFFFF9)")||!text.Contains("\\n")||text.Contains('\n')||!text.Contains("原始校验通过"))throw new Exception("Verified-key formatting is ambiguous or permits log-line injection.");
+            var numberRecord=new VerifiedKeyRecord("0x06000001",2,"Int32",-7,"合成测试");
+            var textRecord=new VerifiedKeyRecord("0x06000002",0,"String","A中\n","合成测试");
+            if(numberRecord.CipherKeyBytesHex!="FFFFFFF9"||textRecord.CipherKeyBytesHex!="41002D4E0A00"||textRecord.CipherKeyEncoding!="UTF-16LE")throw new Exception("Logged key bytes differ from the cipher's serialization.");
             var named=new VerifiedKeyRecord("0x06000003",1,"Int32",123,"合成测试"){
                 OriginalNamespace="Fixture.Space",OriginalTypeName="Outer+Inner",OriginalMethodName="M\n\u0002",
                 OriginalMethodFullName="System.Void Fixture.Space.Outer+Inner::M\n\u0002(System.Int32)"};

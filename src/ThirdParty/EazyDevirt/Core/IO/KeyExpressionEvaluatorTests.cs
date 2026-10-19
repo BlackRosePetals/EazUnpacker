@@ -34,6 +34,24 @@ internal static class KeyExpressionEvaluatorTests
         Expect(Expression(new CilInstruction(CilOpCodes.Ldc_I4_M1),new(CilOpCodes.Conv_U1)),255);
         Expect(Expression(new CilInstruction(CilOpCodes.Ldstr,"")),"");
         Reject(Expression(new CilInstruction(CilOpCodes.Ldarg_0)));
+        var toString=module.DefaultImporter.ImportMethod(typeof(object).GetMethod("ToString")!);
+        var objectLocal=new CilLocalVariable(module.CorLibTypeFactory.Object);
+        host.CilMethodBody.LocalVariables.Add(objectLocal);
+        var runtimeString=Expression(new CilInstruction(CilOpCodes.Ldarg_0),new(CilOpCodes.Callvirt,toString),new(CilOpCodes.Dup),new(CilOpCodes.Stloc,objectLocal),new(CilOpCodes.Ldloc,objectLocal));
+        runtimeString.Locals.Add(local);runtimeString.Locals.Add(objectLocal);
+        if(KeyExpressionEvaluator.InferKeyType(runtimeString,runtimeString.Instructions.Count-1)!="System.String")throw new Exception("Runtime string producer fell back to integer search.");
+        Reject(runtimeString); // Knowing a type does not fabricate its value.
+        if(KeyExpressionEvaluator.InferKeyType(Expression(new CilInstruction(CilOpCodes.Ldc_I4_1)),0)!="System.Int32")throw new Exception("Integer producer type lost.");
+        if(KeyExpressionEvaluator.InferKeyType(Expression(new CilInstruction(CilOpCodes.Ldarg_0)),0)!=null)throw new Exception("Unknown key producer type guessed.");
+        if(KeyExpressionEvaluator.InferKeyType(Expression(new CilInstruction(CilOpCodes.Nop)),99)!=null)throw new Exception("Invalid key index was accepted.");
+        if(KeyExpressionEvaluator.IntrinsicCandidates(Expression(new CilInstruction(CilOpCodes.Ldc_I4_1))).Any())throw new Exception("COM candidates enabled without COM metadata.");
+        var emptyField=module.DefaultImporter.ImportField(typeof(string).GetField("Empty")!);
+        if(KeyExpressionEvaluator.IntrinsicCandidates(Expression(new CilInstruction(CilOpCodes.Ldsfld,emptyField))).Any())throw new Exception("Field member reference mistaken for a method.");
+        var com=new TypeDefinition("Fixture","I"+Guid.NewGuid().ToString("N"),TypeAttributes.Interface|TypeAttributes.Import|TypeAttributes.Abstract,null);
+        module.TopLevelTypes.Add(com);
+        var show=new MethodDefinition("M"+Guid.NewGuid().ToString("N"),MethodAttributes.Public|MethodAttributes.Virtual|MethodAttributes.Abstract,MethodSignature.CreateInstance(module.CorLibTypeFactory.Int32));
+        show.PreserveSignature=true;com.Methods.Add(show);
+        if(!KeyExpressionEvaluator.IntrinsicCandidates(Expression(new CilInstruction(CilOpCodes.Callvirt,show))).Contains(unchecked((int)0x800704c7)))throw new Exception("Generic COM cancellation outcome missing.");
         Reject(Expression(new CilInstruction(CilOpCodes.Ldnull),new(CilOpCodes.Ldc_I4_1),new(CilOpCodes.Add)));
 
         // Loop over a string in a local IL helper without invoking target code.

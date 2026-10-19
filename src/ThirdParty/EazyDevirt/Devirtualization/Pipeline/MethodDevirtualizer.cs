@@ -33,6 +33,9 @@ internal class MethodDevirtualizer : StageBase
         Ctx.Progress?.Invoke("VM 方法还原",0,Ctx.VMMethods.Count);
         for (int pass = 0; pass < 3; pass++)
         {
+        // Restore producers (including virtualized UI/resource initializers)
+        // before spending the module's bounded integer-search budget.
+        Homomorphic.AllowBoundedSearch=pass==2;
         int restoredBefore = Ctx.VMMethods.Count(m=>m.SuccessfullyDevirtualized);
         int restoredInPass=restoredBefore;
         foreach (var vmMethod in Ctx.VMMethods.Where(m=>!m.SuccessfullyDevirtualized))
@@ -60,7 +63,7 @@ internal class MethodDevirtualizer : StageBase
             if(vmMethod.SuccessfullyDevirtualized)restoredInPass++;
             Ctx.Progress?.Invoke("VM 调用点还原（第 "+(pass+1)+" 轮）",restoredInPass,Ctx.VMMethods.Count);
         }
-        if(Ctx.VMMethods.Count(m=>m.SuccessfullyDevirtualized)==restoredBefore)break;
+        if(Ctx.VMMethods.Count(m=>m.SuccessfullyDevirtualized)==restoredBefore && pass==2)break;
         }
         
         VMStreamReader.Dispose();

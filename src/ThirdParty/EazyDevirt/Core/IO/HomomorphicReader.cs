@@ -14,8 +14,17 @@ internal sealed class HomomorphicReader
     private readonly DevirtualizationContext _context;
     private Assembly? _runtime;
     private readonly Dictionary<string, object> _verifiedKeys = new();
+    private readonly Dictionary<string,HashSet<object>> _rejectedKeys=new();
+    private readonly HashSet<string> _searchedIntegers=new();
+    private double _integerSearchSeconds;
+    internal bool AllowBoundedSearch {get;set;}
 
-    public HomomorphicReader(DevirtualizationContext context) => _context = context;
+    public HomomorphicReader(DevirtualizationContext context)
+    {
+        _context=context;
+        _integerSearchSeconds=double.TryParse(Environment.GetEnvironmentVariable("UNPACKER_VM_KEY_SEARCH_SECONDS"),System.Globalization.NumberStyles.Float,System.Globalization.CultureInfo.InvariantCulture,out double seconds)
+            && !double.IsNaN(seconds) ? Math.Max(0,Math.Min(seconds,120)) : 20;
+    }
 
     internal (byte[] Code, int Id) Read(VMMethod method, VMOpCode opcode, BinaryReader reader, long available)
     {
@@ -56,51 +65,70 @@ internal sealed class HomomorphicReader
         string cacheId = verifierDefinition.MetadataToken + ":" + Convert.ToBase64String(verifierBytes) + ":" + salt + ":" + flag;
         if (!_verifiedKeys.TryGetValue(cacheId, out object? key))
         {
+            if(!_rejectedKeys.TryGetValue(cacheId,out var rejected))_rejectedKeys[cacheId]=rejected=new HashSet<object>();
+            var parameters=verifier.GetParameters();
+            bool booleanFlag=parameters.Length==4&&parameters[3].ParameterType==typeof(bool);
+            var verifyBoolean=booleanFlag?(Func<object,byte[],ulong,bool,bool>)Delegate.CreateDelegate(typeof(Func<object,byte[],ulong,bool,bool>),verifier):null;
+            var verifyFour=parameters.Length==4&&parameters[3].ParameterType==typeof(int)?(Func<object,byte[],ulong,int,bool>)Delegate.CreateDelegate(typeof(Func<object,byte[],ulong,int,bool>),verifier):null;
+            var verifyThree=parameters.Length==3?(Func<object,byte[],ulong,bool>)Delegate.CreateDelegate(typeof(Func<object,byte[],ulong,bool>),verifier):null;
             bool Verify(object value)
             {
-                object[] args = guardDescriptor.Signature.ParameterTypes.Count == 4
-                    ? new object[] { value, verifierBytes, salt, verifier.GetParameters()[3].ParameterType == typeof(bool) ? (object)(flag != 0) : flag } : new object[] { value, verifierBytes, salt };
-                try { return verifier.Invoke(null, args) is true; }
+                if(rejected.Contains(value))return false;
+                bool valid;
+                try {
+                    if(verifyBoolean!=null)valid=verifyBoolean(value,verifierBytes,salt,flag!=0);
+                    else if(verifyFour!=null)valid=verifyFour(value,verifierBytes,salt,flag);
+                    else if(verifyThree!=null)valid=verifyThree(value,verifierBytes,salt);
+                    else {
+                        object converted=parameters[3].ParameterType.IsEnum?Enum.ToObject(parameters[3].ParameterType,flag):Convert.ChangeType(flag,parameters[3].ParameterType,System.Globalization.CultureInfo.InvariantCulture);
+                        valid=verifier.Invoke(null,new object[]{value,verifierBytes,salt,converted}) is true;
+                    }
+                }
                 catch (TargetInvocationException exception) when (exception.InnerException is ArgumentException || exception.InnerException is InvalidCastException)
-                { return false; }
+                {valid=false;}
+                catch(Exception exception) when(exception is ArgumentException or InvalidCastException){valid=false;}
+                if(!valid)rejected.Add(value);return valid;
             }
+            string? kind=KeyExpressionEvaluator.InferKeyType(method,count-2);
+            _context.Console.Info($"[{method.Parent.MetadataToken}] Key producer type: {kind??"unknown"}; bounded search allowed: {AllowBoundedSearch}.");
             var expressionCandidates=KeyExpressionEvaluator.Candidates(method,count-2).ToArray();
             object? found=expressionCandidates.FirstOrDefault(Verify);
             string keySource="元数据 / IL 表达式推导";
             if(found!=null)_context.Console.Info($"[{method.Parent.MetadataToken}] Key obtained from a bounded metadata/IL expression; original verifier passed.");
+            if(found==null){found=KeyExpressionEvaluator.IntrinsicCandidates(method).FirstOrDefault(Verify);keySource="标准互操作语义候选";}
             var candidates = KeyCandidates(method, verifierBytes, salt, flag).ToArray();
-            if(found==null){found=candidates.Cast<object>().FirstOrDefault(Verify);keySource="常量 / 显式候选";}
+            if(found==null&&kind!="System.String"){found=candidates.Cast<object>().FirstOrDefault(Verify);keySource="常量 / 显式候选";}
             if (found == null)
             {
                 found = StringKeyCandidates(method, verifierBytes, salt, flag).FirstOrDefault(Verify);
                 keySource="字符串 / 资源候选";
             }
+            if(found==null&&kind=="System.String"){found=candidates.Cast<object>().FirstOrDefault(Verify);keySource="常量 / 显式候选";}
             int limit=int.TryParse(Environment.GetEnvironmentVariable("UNPACKER_VM_KEY_SEARCH_LIMIT"),out int configuredLimit)?configuredLimit:65536;
-            if (found == null && limit > 0)
+            if (found == null && kind!="System.String" && AllowBoundedSearch && limit > 0 && _integerSearchSeconds>0 && _searchedIntegers.Add(cacheId))
             {
                 limit = Math.Min(limit, 10000000);
                 _context.Console.Info($"[{method.Parent.MetadataToken}] Checking {limit} bounded Int32 candidates with verifier {verifierDefinition.MetadataToken}.");
-                string searching=$"[密钥] 正在检查最多 {limit:N0} 个整数候选（方法 0x{method.Parent.MetadataToken.ToUInt32():X8}，区域 {id}）";
+                string searching=$"[密钥] 有界整数搜索（方法 0x{method.Parent.MetadataToken.ToUInt32():X8}，区域 {id}，最多 {limit:N0} 项）";
                 _context.Console.Summary(searching);_context.Progress?.Invoke(searching,0,0);
                 keySource="有界整数搜索";
-                bool booleanFlag = verifier.GetParameters().Length == 4 && verifier.GetParameters()[3].ParameterType == typeof(bool);
-                var verifyBoolean = booleanFlag
-                    ? (Func<object, byte[], ulong, bool, bool>)Delegate.CreateDelegate(typeof(Func<object, byte[], ulong, bool, bool>), verifier) : null;
-                var verifyFour = guardDescriptor.Signature.ParameterTypes.Count == 4 && !booleanFlag
-                    ? (Func<object, byte[], ulong, int, bool>)Delegate.CreateDelegate(typeof(Func<object, byte[], ulong, int, bool>), verifier) : null;
-                var verifyThree = guardDescriptor.Signature.ParameterTypes.Count == 3
-                    ? (Func<object, byte[], ulong, bool>)Delegate.CreateDelegate(typeof(Func<object, byte[], ulong, bool>), verifier) : null;
-                for (int value = 0; value < limit; value++)
+                var elapsed=System.Diagnostics.Stopwatch.StartNew();double nextProgress=1;
+                double budget=Math.Min(5,_integerSearchSeconds);int tested=0;
+                for (int value = 0; value < limit && elapsed.Elapsed.TotalSeconds<budget; value++)
                 {
-                    if (verifyBoolean?.Invoke(value, verifierBytes, salt, flag != 0) ?? verifyFour?.Invoke(value, verifierBytes, salt, flag) ?? verifyThree!(value, verifierBytes, salt)) { found = value; break; }
+                    tested++;
+                    if (Verify(value)) { found = value; break; }
+                    if(elapsed.Elapsed.TotalSeconds>=nextProgress){_context.Progress?.Invoke(searching+$"；已检查 {tested:N0} 项，耗时 {elapsed.Elapsed.TotalSeconds:F1}s",tested,limit);nextProgress+=1;}
                 }
+                _integerSearchSeconds=Math.Max(0,_integerSearchSeconds-elapsed.Elapsed.TotalSeconds);
+                _context.Console.Summary($"[密钥] 整数搜索结束：检查 {tested:N0}/{limit:N0} 项，耗时 {elapsed.Elapsed.TotalSeconds:F1}s；"+(found==null?"未命中，保留原方法。":"原始校验通过。"));
             }
             if (found == null)
             {
                 foreach (var instruction in instructions.Take(guard.Index + 1).Take(35).Concat(instructions.Take(guard.Index + 1).Skip(Math.Max(0, guard.Index - 45))))
                     _context.Console.Info($"[{method.Parent.MetadataToken}] Key setup: {instruction}");
                 _context.Console.Info($"[{method.Parent.MetadataToken}] Guard {verifierDefinition.MetadataToken}; salt={salt}; flag={flag}; RVA={Convert.ToBase64String(verifierBytes)}");
-                throw new NotSupportedException($"Encrypted region {id} needs a verified Int32 key; {candidates.Length} constant candidates rejected. Supply the valid runtime value through UNPACKER_VM_INT32_KEYS.");
+                throw new NotSupportedException($"Encrypted region {id} needs a verified {kind??"runtime"} key; {rejected.Count} distinct candidates rejected. "+(!AllowBoundedSearch?"Deferred until other VM producers are restored.":"No verified candidate; original method preserved."));
             }
             key = found;
             var recovered=new EazyDevirt.Logging.VerifiedKeyRecord("0x"+method.Parent.MetadataToken.ToUInt32().ToString("X8"),id,key is int?"Int32":"String",key,keySource);
@@ -130,12 +158,7 @@ internal sealed class HomomorphicReader
                 i.Operand is MethodDefinition called && called.DeclaringType == cipherType));
         var constructorInfo = _runtime.ManifestModule.ResolveMethod(constructor.MetadataToken.ToInt32()) as ConstructorInfo
             ?? throw new MissingMethodException("Encrypted region cipher token is not a runtime constructor.");
-        byte[] keyBytes;
-        if (key is int integer)
-            keyBytes = new byte[] { (byte)(integer >> 24), (byte)(integer >> 16), (byte)(integer >> 8), (byte)integer };
-        else if (key is string text)
-            keyBytes = System.Text.Encoding.Unicode.GetBytes(text);
-        else throw new NotSupportedException("Unsupported verified key serialization.");
+        byte[] keyBytes=EazyDevirt.Logging.VerifiedKeyRecord.Serialize(key);
         object cipher = constructorInfo.Invoke(new object[] { keyBytes, iv });
         var decrypt = _runtime.ManifestModule.ResolveMethod(decryptDefinition.MetadataToken.ToInt32()) as MethodInfo
             ?? throw new MissingMethodException("Encrypted region decrypt token is not a runtime method.");
@@ -197,6 +220,10 @@ internal sealed class HomomorphicReader
 
     private IEnumerable<string> StringKeyCandidates(VMMethod method,byte[] verifier,ulong salt,int flag)
     {
+        string suppliedJson=Environment.GetEnvironmentVariable("UNPACKER_VM_STRING_KEYS")??"[]";
+        List<string> supplied;
+        try {supplied=Newtonsoft.Json.JsonConvert.DeserializeObject<List<string>>(suppliedJson)??new();}
+        catch(Newtonsoft.Json.JsonException ex){throw new ArgumentException("UNPACKER_VM_STRING_KEYS must be a JSON array of strings.",ex);}
         var profiles=new List<string>();
         string profilePath=Environment.GetEnvironmentVariable("UNPACKER_VM_KEY_CACHE_PATH")??"";
         if(Environment.GetEnvironmentVariable("UNPACKER_VM_USE_KEY_CACHE")=="1" && File.Exists(profilePath))
@@ -214,13 +241,17 @@ internal sealed class HomomorphicReader
         var literals = definitions.SelectMany(t => t.Methods).Where(m => m.CilMethodBody != null)
             .SelectMany(m => m.CilMethodBody!.Instructions).Where(i => i.OpCode.Code == CilCode.Ldstr).Select(i => (string)i.Operand!);
         var metadataNames = definitions.Select(t => t.FullName).Concat(_context.Module.GetImportedTypeReferences().Select(t => t.FullName));
-        return profiles.Concat(method.Instructions.Where(i=>i.OpCode.Code==CilCode.Ldstr).Select(i=>(string)i.Operand!))
-            .Concat(literals).Concat(metadataNames).Concat(ResourceKeyCandidates()).Where(s=>s.Length>0 && s.Length<512).Distinct().Take(10000);
+        return supplied.Take(1000).Concat(profiles).Concat(method.Instructions.Where(i=>i.OpCode.Code==CilCode.Ldstr).Select(i=>(string)i.Operand!))
+            .Concat(literals).Concat(metadataNames).Concat(ResourceKeyCandidates()).Where(s=>s!=null && s.Length<512).Distinct().Take(10000);
     }
 
     private IEnumerable<string> ResourceKeyCandidates()
     {
         var result=new List<string>();
+        // ResourceReader.GetResourceData emits these format identifiers even
+        // when a method processes resources from another input assembly.
+        var resourceCodes=typeof(System.Resources.ResourceReader).Assembly.GetType("System.Resources.ResourceTypeCode");
+        if(resourceCodes?.IsEnum==true)result.AddRange(Enum.GetNames(resourceCodes).Select(n=>"ResourceTypeCode."+n));
         foreach(var resource in _context.Module.Resources.Where(r=>r.IsEmbedded))
         {
             byte[]? bytes=resource.GetData();

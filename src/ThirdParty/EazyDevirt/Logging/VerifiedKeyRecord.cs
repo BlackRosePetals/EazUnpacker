@@ -9,6 +9,12 @@ internal sealed record VerifiedKeyRecord(string MethodToken,int RegionId,string 
     public string OriginalMethodName {get;init;}="";
     public string OriginalMethodFullName {get;init;}="";
     public bool OriginalVerifierPassed => true;
+    public string CipherKeyEncoding => Value is int?"Int32 big-endian":"UTF-16LE";
+    public string CipherKeyBytesHex => BitConverter.ToString(Serialize(Value)).Replace("-","");
+    internal static byte[] Serialize(object key)=>key switch {
+        int integer=>new byte[]{(byte)(integer>>24),(byte)(integer>>16),(byte)(integer>>8),(byte)integer},
+        string text=>System.Text.Encoding.Unicode.GetBytes(text),
+        _=>throw new NotSupportedException("Unsupported verified key serialization.")};
     internal string Format()
     {
         string value=Value is int number?number+" (0x"+unchecked((uint)number).ToString("X8")+")":JsonConvert.SerializeObject(Value);

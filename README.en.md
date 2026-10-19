@@ -28,7 +28,7 @@ A command-line unpacker and deobfuscator for **Eazfuscator.NET managed assemblie
 Extract `EazUnpacker-v1.1.0-win.zip` and keep every subdirectory, including `worker\modern`. Run `Unpacker.exe`; copying the EXE alone is not sufficient.
 
 - **Runtime**: Windows and .NET Framework 4.8. Modern .NET targets also need a suitable .NET Desktop Runtime. The modern worker targets .NET 8 and can roll forward to installed newer major versions.
-- **Permissions**: extract to a writable directory; the tool creates `temp` beside its executable.
+- **Permissions**: use a short, writable directory; the tool creates `temp` beside its executable. Framework loaders or third-party tools can still encounter Windows long-path limits.
 - **SDK**: not required for ordinary recovery. Rebuilding C# needs a .NET SDK and the target project's references. See [development](#development-and-tests) to build the tool itself.
 
 ### 2. Run a command
@@ -89,6 +89,10 @@ The default UTF-8 log shows stages, progress, verified keys, bounded failure sum
 
 Original names mean names still present in this run's VM input, not recovered author symbols. A key passing its original verifier does not guarantee subsequent region decoding succeeds.
 
+Only originally verified values are labeled `[密钥]`. The console shows the actual integer/string; JSON retains `Value`, `KeyType`, original method identities, and the exact `CipherKeyEncoding` / `CipherKeyBytesHex` used for decryption. Integers use four big-endian bytes; strings use UTF-16LE. Rejected candidates are not reported as correct keys.
+
+Key recovery infers expressions and types first, restores other VM methods to expose candidates, then retries unresolved regions. String keys do not enter integer enumeration. Standard resource identifiers and COM outcomes remain subject to original verification; they are not sample-key profiles. Failed candidates are deduplicated for fixed verifier inputs within the run. Integer fallback has both count and time limits. Target verifiers with unknown thread safety are not invoked concurrently.
+
 ### Environment variables
 
 | Variable | Purpose |
@@ -97,7 +101,9 @@ Original names mean names still present in this run's VM input, not recovered au
 | `UNPACKER_VM_VERBOSE=1` | More mapping information |
 | `UNPACKER_VM_DEBUG=1` | Per-method/instruction diagnostics |
 | `UNPACKER_VM_KEY_SEARCH_LIMIT` | Bounded integer search count; default `65536`, `0` disables it, maximum ten million |
+| `UNPACKER_VM_KEY_SEARCH_SECONDS` | Module-wide integer fallback time budget; default `20` seconds, at most `5` per verifier, `0` disables it, maximum `120` |
 | `UNPACKER_VM_INT32_KEYS` | Comma-separated integer candidates; original verification remains mandatory |
+| `UNPACKER_VM_STRING_KEYS` | Explicit string candidates as a JSON array; original verification remains mandatory |
 | `UNPACKER_VM_USE_KEY_CACHE=1` | Permit explicitly supplied historical candidate cache |
 | `UNPACKER_VM_KEY_CACHE_PATH` | Candidate cache path; no sample-key table is bundled or read by default |
 
