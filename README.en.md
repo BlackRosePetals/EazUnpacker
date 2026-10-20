@@ -2,7 +2,7 @@
 
 A command-line unpacker and deobfuscator for **Eazfuscator.NET managed assemblies**. Recover analyzable IL, generate readable identifiers, and optionally export a C# project.
 
-[简体中文](README.md) · **English** · **v1.1.0** · [Changelog](CHANGELOG.md)
+[简体中文](README.md) · **English** · **v1.2.0** · [Changelog](CHANGELOG.md)
 
 [Quick start](#quick-start) · [Features](#features) · [Options](#options-and-exit-codes) · [Development](#development-and-build)
 
@@ -25,7 +25,7 @@ A command-line unpacker and deobfuscator for **Eazfuscator.NET managed assemblie
 
 ### 1. Extract the complete release
 
-Extract `EazUnpacker-v1.1.0-win.zip` and keep every subdirectory, including `worker\modern`. Run `Unpacker.exe`; copying the EXE alone is not sufficient.
+Extract `EazUnpacker-v1.2.0-win.zip` and keep every subdirectory, including `worker\modern`. Run `Unpacker.exe`; copying the EXE alone is not sufficient.
 
 - **Runtime**: Windows and .NET Framework 4.8. Modern .NET targets also need a suitable .NET Desktop Runtime. The modern worker targets .NET 8 and can roll forward to installed newer major versions.
 - **Permissions**: use a short, writable directory; the tool creates `temp` beside its executable. Framework loaders or third-party tools can still encounter Windows long-path limits.
@@ -133,7 +133,7 @@ Echo also keeps upstream references such as `System.Collections.Immutable` and `
 
 ## Development and build
 
-Run from the repository root. Building requires an SDK that supports `.slnx` and .NET Framework 4.8 development references. This v1.1.0 release was built with the .NET 10 SDK.
+Run from the repository root. Building requires an SDK that supports `.slnx` and .NET Framework 4.8 development references. This v1.2.0 release was built with the .NET 10 SDK.
 
 ```powershell
 dotnet build Unpacker.slnx -c Release
