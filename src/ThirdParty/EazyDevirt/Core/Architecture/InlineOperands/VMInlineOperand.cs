@@ -102,7 +102,12 @@ internal record VMInlineOperand
 
     public static VMInlineOperand[] ReadArrayInternal(BinaryReader reader)
     {
-        var count = ReadEncodedInt(reader);
+        var count = EazyDevirt.Devirtualization.DevirtualizationContext.Instance.TypeOperandLayout.ArrayCountEncoding switch
+        {
+            VMArrayCountEncoding.Int16 => reader.ReadInt16(),
+            VMArrayCountEncoding.Int32 => reader.ReadInt32(),
+            _ => ReadEncodedInt(reader)
+        };
         if (count < 0 || count > 1000000) throw new InvalidDataException("Invalid VM operand array length.");
         var arr = new VMInlineOperand[count];
 

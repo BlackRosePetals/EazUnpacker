@@ -43,8 +43,8 @@ internal record DevirtualizationContext
     public FieldDefinition VMArgumentsField { get; set; } = null!;
     public MethodDefinition VMExecuteVMMethod { get; set; } = null!;
     public TypeDefinition VMDeclaringType { get; set; } = null!;
-    public VMCipherStream VMStream { get; set; } = null!;
-    public VMCipherStream VMResolverStream { get; set; } = null!;
+    public Stream VMStream { get; set; } = null!;
+    public Stream VMResolverStream { get; set; } = null!;
     public int PositionCryptoKey { get; set; }
     public int MethodCryptoKey { get; set; }
 
@@ -53,6 +53,7 @@ internal record DevirtualizationContext
     public Dictionary<int, AsmResolver.PE.DotNet.Cil.CilOperandType> OperandLayout { get; set; } = new();
     public Dictionary<byte, EazyDevirt.Core.Architecture.InlineOperands.VMInlineOperandType> InlineLayout { get; set; } = new();
     public byte TokenTag { get; set; }
+    public VMTypeWireLayout TypeOperandLayout { get; set; } = null!;
     public int MethodStaticMask { get; set; }
     public int MethodGenericMask { get; set; }
 

@@ -50,12 +50,20 @@ internal record VMTypeData : VMInlineOperandData
     
     public VMTypeData(BinaryReader reader) : base(VMInlineOperandType.Type)
     {
-        Name = reader.ReadString();
-        HasGenericTypeParameters = reader.ReadBoolean();
-        IsGenericParameterIndex = reader.ReadBoolean();
-        GenericMethodParameterIndex = reader.ReadInt32();
-        GenericTypeParameterIndex = reader.ReadInt32();
-        GenericParameters = VMInlineOperand.ReadArrayInternal(reader);
+        Name = "";
+        GenericParameters = Array.Empty<VMInlineOperand>();
+        foreach (var field in EazyDevirt.Devirtualization.DevirtualizationContext.Instance.TypeOperandLayout.Fields)
+        {
+            switch(field)
+            {
+                case VMTypeWireField.Name: Name=reader.ReadString();break;
+                case VMTypeWireField.GenericParameter: IsGenericParameterIndex=reader.ReadBoolean();break;
+                case VMTypeWireField.GenericArguments: HasGenericTypeParameters=reader.ReadBoolean();break;
+                case VMTypeWireField.MethodIndex: GenericMethodParameterIndex=reader.ReadInt32();break;
+                case VMTypeWireField.TypeIndex: GenericTypeParameterIndex=reader.ReadInt32();break;
+                case VMTypeWireField.Arguments: GenericParameters=VMInlineOperand.ReadArrayInternal(reader);break;
+            }
+        }
     }
 }
 

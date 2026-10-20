@@ -5,21 +5,24 @@ using Org.BouncyCastle.Math;
 
 namespace EazyDevirt.Core.IO;
 
-/// <summary>Seekable, cached RSA/PKCS1 resource stream. Reads respect logical block boundaries.</summary>
+/// <summary>Seekable, cached raw or PKCS1 RSA resource stream with logical block boundaries.</summary>
 internal sealed class VMCipherStream : Stream
 {
-    private const int InputBlockSize = 256;
-    private const int OutputBlockSize = 245;
+    private readonly int InputBlockSize;
+    private readonly int OutputBlockSize;
     private readonly MemoryStream _resource;
-    private readonly Pkcs1Encoding _rsa;
+    private readonly Org.BouncyCastle.Crypto.IAsymmetricBlockCipher _rsa;
     private readonly Dictionary<int, byte[]> _blocks = new();
     private long _position;
     private int? _length;
 
-    public VMCipherStream(byte[] buffer, BigInteger mod, BigInteger exp, int? knownLength = null)
+    public VMCipherStream(byte[] buffer, BigInteger mod, BigInteger exp, int? knownLength = null, bool raw = false)
     {
         _resource = new MemoryStream(buffer, false);
-        _rsa = new Pkcs1Encoding(new RsaEngine());
+        InputBlockSize = (mod.BitLength + 7) / 8;
+        OutputBlockSize = raw ? (mod.BitLength - 1) / 8 : InputBlockSize - 11;
+        if (OutputBlockSize <= 0) throw new InvalidDataException("Invalid VM RSA block size.");
+        _rsa = raw ? new RsaEngine() : new Pkcs1Encoding(new RsaEngine());
         // Eaz uses type-2 PKCS1 padding with a public exponent; the decoder expects the private flag.
         _rsa.Init(false, new RsaKeyParameters(true, mod, exp));
         _length = knownLength;
@@ -41,6 +44,12 @@ internal sealed class VMCipherStream : Stream
             total += read;
         }
         byte[] decoded = _rsa.ProcessBlock(encoded, 0, encoded.Length);
+        if (_rsa is RsaEngine && decoded.Length < OutputBlockSize)
+        {
+            var padded = new byte[OutputBlockSize];
+            Buffer.BlockCopy(decoded, 0, padded, padded.Length - decoded.Length, decoded.Length);
+            decoded = padded;
+        }
         int required = (int)Math.Min(OutputBlockSize, Length - (long)id * OutputBlockSize);
         if (required <= 0 || decoded.Length < required || decoded.Length > OutputBlockSize)
             throw new InvalidDataException("Invalid RSA output block length.");
@@ -79,7 +88,7 @@ internal sealed class VMCipherStream : Stream
                 _resource.Position = 0;
                 using var crypto = new CryptoStreamV3(_resource, 0, true);
                 using var reader = new VMBinaryReader(crypto);
-                int length = reader.ReadInt32();
+                int length = reader.ReadInt32Special();
                 if (length < 0 || length > ((_resource.Length - 4) / InputBlockSize) * OutputBlockSize)
                     throw new InvalidDataException("Invalid VM resource length.");
                 _length = length;
