@@ -10,7 +10,6 @@ internal record PushStackPattern : IPattern
     public override IList<CilOpCode> Pattern => new[] { CilOpCodes.Callvirt };
     public override bool MatchEntireBody => false;
     public override bool Verify(CilInstructionCollection instructions, int index = 0) =>
-        instructions[index].Operand is IMethodDescriptor method && method.Name == "Push" &&
-        method.DeclaringType?.FullName.StartsWith("System.Collections.Generic.Stack`1<") == true &&
+        instructions[index].Operand is IMethodDescriptor method && StackAccess.IsPush(method) &&
         method.Signature?.ParameterTypes.Count == 1 && method.Signature.ReturnType.FullName == "System.Void";
 }

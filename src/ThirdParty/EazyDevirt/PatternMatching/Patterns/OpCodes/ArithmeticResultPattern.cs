@@ -19,6 +19,15 @@ internal static class ArithmeticResultPattern
             next = instructions.GetIndexByOffset(label.Offset);
             if (next < 0) return false;
         }
+        if (next + 4 < instructions.Count && instructions[next].OpCode.Code==CilCode.Newobj &&
+            instructions[next+1].OpCode.Code==CilCode.Dup && instructions[next+2].IsLdloc() &&
+            instructions[next+2].GetLocalVariableIndex()==instructions[storeIndex].GetLocalVariableIndex() &&
+            instructions[next+3].Operand is IMethodDescriptor setter && setter.Signature?.ParameterTypes.Count==1 &&
+            setter.Signature.ReturnType.FullName=="System.Void" &&
+            setter.Signature.ParameterTypes[0].FullName is "System.Int32" or "System.Int64" &&
+            instructions[next+4].OpCode.Code==CilCode.Ret &&
+            instructions[next].Operand is IMethodDescriptor emptyCtor && emptyCtor.DeclaringType==setter.DeclaringType)
+            return true;
         if (next + 2 >= instructions.Count || !instructions[next].IsLdloc() ||
             instructions[next].GetLocalVariableIndex() != instructions[storeIndex].GetLocalVariableIndex() ||
             instructions[next + 1].OpCode.Code != CilCode.Newobj ||

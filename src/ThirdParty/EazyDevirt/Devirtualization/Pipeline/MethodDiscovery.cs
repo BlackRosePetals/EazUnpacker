@@ -125,7 +125,14 @@ internal sealed class MethodDiscovery : StageBase
             if (Ctx.Options.VeryVerbose)
                 Ctx.Console.InfoStr("Virtualized method found", method.MetadataToken);
 
-            var methodKey =  DecodeMethodKey(encodedMethodKey, Ctx.PositionCryptoKey);
+            long methodKey;
+            try { methodKey = DecodeMethodKey(encodedMethodKey, Ctx.PositionCryptoKey); }
+            catch (Exception ex) when (ex is FormatException or OverflowException or EndOfStreamException)
+            {
+                Ctx.VMMethods.Add(new VMMethod(method, encodedMethodKey, -1) { ExecutorInstruction = callSite.Executor,
+                    Failure = "Invalid VM position encoding." });
+                continue;
+            }
             if(methodKey<0 || methodKey>=Ctx.VMStream.Length) {Ctx.Console.Warning("VM method position out of bounds: "+method.MetadataToken);continue;}
             Ctx.VMMethods.Add(new VMMethod(method, encodedMethodKey, methodKey) { ExecutorInstruction = callSite.Executor });
             }
@@ -213,7 +220,7 @@ internal sealed class MethodDiscovery : StageBase
                 if (executor.OpCode.Code is not (CilCode.Call or CilCode.Callvirt) || executor.Operand is not IMethodDescriptor target || target.Signature?.ParameterTypes.Count < 3 ||
                     target.Signature == null || target.Signature.ParameterTypes[0].FullName != "System.IO.Stream" || target.Signature.ParameterTypes[1].FullName != "System.String" || target.Signature.ParameterTypes[2].FullName != "System.Object[]" ||
                     target.Signature.ParameterTypes[target.Signature.ParameterTypes.Count - 1].FullName != "System.Object[]") continue;
-                string? key = instructions.Skip(index + 1).Take(at-index-1).Where(i => i.OpCode.Code == CilCode.Ldstr).Select(i => i.Operand as string).LastOrDefault();
+                string? key = instructions.Skip(index + 1).Take(at-index-1).Where(i => i.OpCode.Code == CilCode.Ldstr).Select(i => i.Operand as string).FirstOrDefault();
                 if (key != null) yield return (executor, key);
                 break;
             }

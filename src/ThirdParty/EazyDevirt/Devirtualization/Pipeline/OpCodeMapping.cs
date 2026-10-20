@@ -116,8 +116,13 @@ internal class OpCodeMapping : StageBase
             if(dictionaryInstructions[i].Operand is not IMethodDescriptor add || add.Name!="Add" ||
                 !add.DeclaringType!.FullName.StartsWith("System.Collections.Generic.Dictionary"))continue;
             var segment=dictionaryInstructions.Skip(start).Take(i-start).ToArray();start=i+1;
-            var fields=segment.Where(x=>x.OpCode.Code==CilCode.Ldfld).Select(x=>x.Operand).OfType<SerializedFieldDefinition>().Distinct().ToArray();
             var handler=segment.Where(x=>x.OpCode.Code==CilCode.Ldftn).Select(x=>x.Operand).OfType<SerializedMethodDefinition>().LastOrDefault();
+            // Instance dictionaries also load the runtime's container field.
+            // Only the fields holding the opcode record belong in this map.
+            var record = segment.Where(x=>x.OpCode.Code==CilCode.Newobj).Select(x=>x.Operand)
+                .OfType<IMethodDescriptor>().LastOrDefault()?.Signature?.ParameterTypes.FirstOrDefault()?.FullName;
+            var fields=segment.Where(x=>x.OpCode.Code==CilCode.Ldfld).Select(x=>x.Operand)
+                .OfType<SerializedFieldDefinition>().Where(f=>f.Signature?.FieldType.FullName==record).Distinct().ToArray();
             if(fields.Length==0 || handler==null)continue;
             containerType ??=fields[0].DeclaringType!;
             foreach(var field in fields)vmOpCodes.Add(new VMOpCode(field,handler));
@@ -183,6 +188,11 @@ internal class OpCodeMapping : StageBase
                 vmOpCode.SpecialOpCode = opCodePat.SpecialOpCode;
                 vmOpCode.IsSpecial = opCodePat.IsSpecial;
             }
+            else if (ExpandedHandlers.Identify(vmOpCode) is { } expanded)
+            {
+                vmOpCode.IsIdentified = true;
+                vmOpCode.CilOpCode = expanded;
+            }
             else if (Ctx.Options.VeryVerbose)
                 Ctx.Console.Warning($"Failed to identify VM opcode [{vmOpCode}]");
 
@@ -200,11 +210,15 @@ internal class OpCodeMapping : StageBase
         return true;
     }
 
-    private MethodDefinition FindOpCodeMethod() =>
-        Ctx.VMDeclaringType.Methods.FirstOrDefault(method => method is { IsPrivate: true, IsStatic: true, Parameters.Count: 1 } && 
-                                                             method.Signature!.ReturnsValue && 
-                                                             method.Signature.ReturnType.FullName.StartsWith("System.Collections.Generic.Dictionary")
-        )!;
+    private MethodDefinition? FindOpCodeMethod()
+    {
+        var candidates = Ctx.VMDeclaringType.Methods.Where(method => method.Signature?.ReturnsValue == true &&
+            method.Signature.ReturnType.FullName.StartsWith("System.Collections.Generic.Dictionary") &&
+            method.CilMethodBody?.Instructions.Any(i=>i.OpCode.Code==CilCode.Ldftn) == true &&
+            method.CilMethodBody.Instructions.Any(i=>i.Operand is IMethodDescriptor add && add.Name=="Add" &&
+                add.DeclaringType?.FullName==method.Signature.ReturnType.FullName)).ToArray();
+        return candidates.Length == 1 ? candidates[0] : null;
+    }
 
     public OpCodeMapping(DevirtualizationContext ctx) : base(ctx)
     {

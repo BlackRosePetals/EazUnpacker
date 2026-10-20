@@ -21,6 +21,6 @@ internal record PopStackPattern : IPattern
     public override bool Verify(MethodDefinition method, int index)
     {
         var instructions = method.CilMethodBody?.Instructions;
-        return method.Parameters.Count == 0 && (instructions![index + 2].Operand as SerializedMemberReference)?.Name == "Pop";
+        return method.Parameters.Count == 0 && instructions![index + 2].Operand is IMethodDescriptor target && StackAccess.IsPop(target);
     }
 }

@@ -59,6 +59,11 @@ internal record Newobj : IOpCodePattern
     public override bool Verify(VMOpCode vmOpCode, int index)
     {
         var helper = vmOpCode.SerializedDelegateMethod.CilMethodBody!.Instructions[2].Operand as SerializedMethodDefinition;
+        return IsObjectCreation(helper);
+    }
+
+    internal static bool IsObjectCreation(SerializedMethodDefinition? helper)
+    {
         if (helper?.CilMethodBody == null) return false;
         if (PatternMatcher.MatchesPattern(new RunNewObjectPattern(), helper)) return true;
         var trace = PatternMatcher.StraightLinePrefix(helper);

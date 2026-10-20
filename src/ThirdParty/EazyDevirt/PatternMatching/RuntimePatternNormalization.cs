@@ -45,6 +45,12 @@ internal sealed class RuntimePatternNormalization : IDisposable
         var aliases = new Dictionary<CilInstruction, CilInstruction>();
         var clones = new Dictionary<CilInstruction, CilInstruction>();
         var output = new List<CilInstruction>();
+        var branchTargets = new HashSet<int>(original.SelectMany(instruction => instruction.Operand switch
+        {
+            ICilLabel label => new[] { label.Offset },
+            IList<ICilLabel> labels => labels.Select(label => label.Offset),
+            _ => Enumerable.Empty<int>()
+        }));
         var pending = new Queue<int>();
         pending.Enqueue(0);
         while (pending.Count != 0)
@@ -55,6 +61,20 @@ internal sealed class RuntimePatternNormalization : IDisposable
             while (at >= 0 && at < original.Length)
             {
                 var instruction = original[at];
+                if (instruction.IsLdcI4() && at + 2 < original.Length &&
+                    !branchTargets.Contains(original[at + 1].Offset) &&
+                    original[at + 1].OpCode.Code is CilCode.Brtrue or CilCode.Brtrue_S or CilCode.Brfalse or CilCode.Brfalse_S &&
+                    original[at + 1].Operand is ICilLabel constantTarget)
+                {
+                    bool take = (instruction.GetLdcI4Constant() != 0) ==
+                        (original[at + 1].OpCode.Code is CilCode.Brtrue or CilCode.Brtrue_S);
+                    int target = take ? Index(constantTarget) : at + 2;
+                    if (!visitedBranches.Add(at)) throw new InvalidDataException("Cyclic VM constant branch trace.");
+                    aliases[instruction] = original[target];
+                    aliases[original[at + 1]] = original[target];
+                    at = target;
+                    continue;
+                }
                 if (instruction.OpCode.Code is CilCode.Br or CilCode.Br_S && instruction.Operand is ICilLabel jump)
                 {
                     int target = Index(jump);
