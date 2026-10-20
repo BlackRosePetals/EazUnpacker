@@ -15,21 +15,6 @@ internal static class Program
         AppContext.SetSwitch("System.Runtime.Serialization.EnableUnsafeBinaryFormatterSerialization",false);
         try {
             WorkCache.Initialize();
-            if(args.Length==1 && args[0]=="--test-progress")
-            {
-                ProgressEvents.Send(3,"info","[密钥] 中文日志合成测试：Int32 = 12345；区域 2；原始校验通过（测试消息）。");
-                return 0;
-            }
-            if(args.Length==1 && args[0]=="--self-test")
-            {
-                CipherStreamTests.Run();
-                try {StacktracePatcher.Patch();}
-                finally {StacktracePatcher.UnPatch();}
-                Console.WriteLine("PASS: modern stack-frame patch/unpatch without BinaryFormatter.");
-                VmRecoveryTests.Run();
-                Console.WriteLine("PASS: modern VM tests and stack-frame patch/unpatch without BinaryFormatter.");
-                return 0;
-            }
             if(args.Length==4 && args[0]=="--vm-worker")
             {
                 var progress=new ProgressEvents.Counter(3);

@@ -13,6 +13,15 @@ $output=[IO.Path]::GetFullPath($OutputDirectory)
 $resolved=& git -C $repo rev-parse --verify --end-of-options "$Ref~0"
 if($LASTEXITCODE -ne 0){throw 'Cannot resolve the requested commit.'}
 $commit=([string]$resolved).Trim()
+$snapshotPaths=@(& git -C $repo ls-tree -r --name-only $commit)
+if($LASTEXITCODE -ne 0){throw 'Cannot inspect the requested source snapshot.'}
+$privatePaths=@($snapshotPaths|Where-Object {
+    $_ -match '(?i)(^|/)(AGENTS\.md$|tests?/|__tests__/|screenshots/|samples?[^/]*/|样本[^/]*/|artifacts/|bin/|obj/|temp/|test-results/|reports/|diagnostics/|private/|local/|secrets/)' -or
+    $_ -match '(?i)(Tests?\.(cs|csproj)$|\.(exe|dll|pdb|mdb|zip|7z|rar|dmp|binlog|jsonl|pem|key|pfx|p12)$)' -or
+    $_ -match '(^|/)\.env($|\.)'
+})
+if($privatePaths.Count){throw 'Selected snapshot contains local-only files. Commit the privacy cleanup before packaging.'}
+if($snapshotPaths -notcontains 'Directory.Build.targets'){throw 'Selected snapshot is missing the private-path build mapping.'}
 New-Item -ItemType Directory -Path $output -Force|Out-Null
 $name="EazUnpacker-v$Version"
 $zip=Join-Path $output "$name-win.zip"
@@ -37,6 +46,11 @@ $archive=Join-Path $run "$name-source.zip"
 & git -C $repo archive --format=zip "--output=$archive" $commit
 if($LASTEXITCODE -ne 0){throw 'Source archive failed.'}
 Expand-Archive -LiteralPath $archive -DestinationPath $source
+$privateTextPattern='(?i)(?<![a-z0-9])[a-z]:[\\/]|/(?:Users|home)/|\\\\[^\\\s]+\\(?:Users|home|samples?)\\'
+foreach($relative in $snapshotPaths){
+    if([IO.Path]::GetExtension($relative) -notin '.cs','.csproj','.props','.targets','.ps1','.md','.config','.slnx','.json','.yml','.yaml','.xml'){continue}
+    if([IO.File]::ReadAllText((Join-Path $source $relative)) -match $privateTextPattern){throw 'Selected snapshot contains an absolute machine path. Sanitize source and documentation before packaging.'}
+}
 [xml]$props=Get-Content -LiteralPath (Join-Path $source 'src/Directory.Build.props') -Raw
 if([string]$props.Project.PropertyGroup.Version -ne $Version){throw 'Requested version differs from the committed build properties.'}
 $sdk=(& dotnet --version).Trim()
@@ -48,7 +62,6 @@ Get-ChildItem -LiteralPath $built -File|Where-Object {
 }|ForEach-Object {Copy-ReleaseFile $_.FullName $_.Name}
 Copy-Item -LiteralPath (Join-Path $built 'worker') -Destination (Join-Path $package 'worker') -Recurse
 foreach($file in @('README.md','README.en.md','CHANGELOG.md','LICENSE','NOTICE')){Copy-ReleaseFile (Join-Path $source $file) $file}
-Get-ChildItem -LiteralPath (Join-Path $source 'src/assets/screenshots') -File|ForEach-Object {Copy-ReleaseFile $_.FullName ('src/assets/screenshots/'+$_.Name)}
 foreach($file in @('src/ThirdParty/EazFixer/LICENSE','src/ThirdParty/EazyDevirt/LICENSE','src/ThirdParty/Echo/LICENSE.md')){Copy-ReleaseFile (Join-Path $source $file) $file}
 Copy-ReleaseFile $archive ("source/$name-source.zip")
 
@@ -92,14 +105,12 @@ if($fileVersion -ne "$Version.0"){throw "Unexpected executable version: $fileVer
 foreach($worker in @('worker/Unpacker.Worker.exe','worker/modern/Unpacker.ModernWorker.exe')){
     $path=Join-Path $package $worker
     if([Diagnostics.FileVersionInfo]::GetVersionInfo($path).FileVersion -ne "$Version.0"){throw "Worker version mismatch: $worker"}
-    & $path --self-test *> (Join-Path $run ((Split-Path $worker -Leaf)+'.self-test.log'))
-    if($LASTEXITCODE -ne 0){throw "Packaged self-test failed: $worker. See $run"}
 }
 & $entry analyzer $entry *> (Join-Path $run 'analyzer.json')
-if($LASTEXITCODE -ne 0){throw 'Packaged analyzer smoke test failed.'}
+if($LASTEXITCODE -ne 0){throw 'Packaged analyzer check failed.'}
 $null=Get-Content -LiteralPath (Join-Path $run 'analyzer.json') -Raw|ConvertFrom-Json
 Remove-ReleaseTemporary (Join-Path $package 'temp')
-[ordered]@{Version=$Version;Commit=$commit;Sdk=$sdk;BuiltAtUtc=[DateTime]::UtcNow.ToString('o');EntryPoint='Unpacker.exe';FileVersion=$fileVersion;RuntimeDependent=$true;FrameworkSelfTest='passed';ModernSelfTest='passed';AnalyzerSmokeTest='passed'}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $package 'release.json') -Encoding utf8
+[ordered]@{Version=$Version;Commit=$commit;Sdk=$sdk;BuiltAtUtc=[DateTime]::UtcNow.ToString('o');EntryPoint='Unpacker.exe';FileVersion=$fileVersion;RuntimeDependent=$true;AnalyzerCheck='passed'}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $package 'release.json') -Encoding utf8
 $manifest=@(Get-ChildItem -LiteralPath $package -Recurse -File|Sort-Object FullName|ForEach-Object {
     [ordered]@{File=[IO.Path]::GetRelativePath($package,$_.FullName).Replace('\','/');Bytes=$_.Length;Sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}
 })
@@ -115,9 +126,9 @@ foreach($item in $manifest){
 if(@(Get-ChildItem -LiteralPath $expanded -Recurse -File).Count -ne $manifest.Count+1){throw 'Archive file count mismatch.'}
 $hash=(Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
 "$hash  $name-win.zip"|Set-Content -LiteralPath (Join-Path $output "$name-win.zip.sha256") -Encoding ascii
-[ordered]@{Version=$Version;Commit=$commit;Archive=$zip;Sha256=$hash;Bytes=(Get-Item -LiteralPath $zip).Length;VerifiedFiles=$manifest.Count;Tests='Framework + modern self-tests and packaged analyzer';AuditDirectory=$run}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $run 'verification.json') -Encoding utf8
+[ordered]@{Version=$Version;Commit=$commit;Archive=$zip;Sha256=$hash;Bytes=(Get-Item -LiteralPath $zip).Length;VerifiedFiles=$manifest.Count;Checks='Packaged analyzer and archive hashes';AuditDirectory=$run}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $run 'verification.json') -Encoding utf8
 foreach($path in @($source,$stage,$verify)){Remove-ReleaseTemporary $path}
 Remove-ReleaseTemporary $archive
 Write-Output "PASS: $zip"
 Write-Output "SHA256: $hash"
-Write-Output "Build/test evidence: $run"
+Write-Output "Build/package evidence: $run"

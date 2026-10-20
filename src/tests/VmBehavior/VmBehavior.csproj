@@ -1,6 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup><OutputType>Exe</OutputType><TargetFrameworks>net48;net8.0-windows</TargetFrameworks><LangVersion>latest</LangVersion><Nullable>enable</Nullable></PropertyGroup>
-  <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0-windows'"><UseWindowsForms>true</UseWindowsForms><CheckEolTargetFramework>false</CheckEolTargetFramework></PropertyGroup>
-  <ItemGroup Condition="'$(TargetFramework)' == 'net48'"><Reference Include="System.Windows.Forms" /></ItemGroup>
-  <ItemGroup><Compile Include="..\..\WorkerDesktop.cs" Link="WorkerDesktop.cs" /><PackageReference Include="Newtonsoft.Json" Version="13.0.3" /><PackageReference Include="dnlib" Version="4.5.0" /></ItemGroup>
-</Project>

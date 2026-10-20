@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <!-- Keep developer-machine paths out of compiled metadata and symbols. -->
+    <Deterministic>true</Deterministic>
+    <PathMap>$(MSBuildThisFileDirectory)=/_/</PathMap>
+  </PropertyGroup>
+</Project>

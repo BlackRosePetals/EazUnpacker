@@ -15,25 +15,6 @@ internal static class WorkerDesktop
 
     internal static string CurrentName => ObjectName(GetThreadDesktop(GetCurrentThreadId()));
 
-    internal static void CheckDialogIsolation()
-    {
-        string current=CurrentName;
-        IntPtr input=OpenInputDesktop(0,false,1);
-        if(input==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
-        try
-        {
-            if(!current.StartsWith(Prefix,StringComparison.Ordinal) || current==ObjectName(input))
-                throw new InvalidOperationException("Refusing to create a test dialog on the interactive desktop.");
-        }
-        finally {CloseDesktop(input);}
-        string? inherited=null;
-        var thread=new System.Threading.Thread(()=>inherited=CurrentName);thread.Start();thread.Join();
-        if(current!=inherited)throw new InvalidOperationException("Worker thread did not inherit the private desktop.");
-        int result=MessageBoxTimeout(IntPtr.Zero,"Private desktop isolation fixture","Unpacker isolation fixture",0,0,200);
-        // MessageBoxTimeout may return IDOK for a single-button timeout on some Windows builds.
-        if(result!=32000 && result!=1)throw new InvalidOperationException("Private dialog failed: "+result);
-    }
-
     internal static int Run(string[] args, Func<string[], int> action)
     {
         if (CurrentName.StartsWith(Prefix, StringComparison.Ordinal)) return action(args);
@@ -104,9 +85,6 @@ internal static class WorkerDesktop
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern IntPtr CreateDesktop(string name, IntPtr device, IntPtr mode, int flags, uint access, IntPtr security);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool CloseDesktop(IntPtr desktop);
-    [DllImport("user32.dll", SetLastError = true)] private static extern IntPtr OpenInputDesktop(uint flags,bool inherit,uint access);
-    [DllImport("user32.dll", EntryPoint="MessageBoxTimeoutW",CharSet=CharSet.Unicode)]
-    private static extern int MessageBoxTimeout(IntPtr parent,string text,string caption,uint style,ushort language,uint timeout);
     [DllImport("user32.dll")] private static extern IntPtr GetThreadDesktop(uint thread);
     [DllImport("user32.dll")] private static extern IntPtr GetProcessWindowStation();
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]

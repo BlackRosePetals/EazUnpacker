@@ -6,6 +6,23 @@ test-results/
 packages/
 TestResults/
 *.trx
+# Local agent instructions
+AGENTS.md
+# Local-only tests, fixtures and test scripts
+[Tt]est/
+[Tt]ests/
+__tests__/
+*.Tests/
+*.Test/
+*[Tt]est.cs
+*[Tt]ests.cs
+*[Tt]est.csproj
+*[Tt]ests.csproj
+[Tt]est[-_.]*
+[Tt]ests[-_.]*
+*[-_.][Tt]est.*
+*[-_.][Tt]ests.*
+*.spec.*
 # IDE settings
 .vs/
 .idea/
@@ -20,10 +37,58 @@ TestResults/
 # Program-local temporary files
 temp/
 # Local inputs and outputs
-samples/
-样本/
+[Ss]ample*/
+样本*/
+[Ll]ocal/
+[Pp]rivate/
+[Ss]creenshots/
+[Cc]aptures/
+[Dd]iagnostics/
+[Rr]eports/
+[Ee]xports/
+[Dd]umps/
+# Generated reports, symbols and distributables may contain local paths or inputs
+*.dll
+*.exe
+*.pdb
+*.mdb
+*.zip
+*.7z
+*.rar
+*.nupkg
+*.snupkg
+*.dmp
+*.dump
+*.binlog
+*.sarif
+*.jsonl
+result.json
+latest.json
+progress.json
+vm-*.json
+inline-expressions.json
+rename-map.json
+control-flow-cleanup.json
+recovery-statistics.json
+clr-validation.json
+manifest.json
+release.json
+verification.json
+# Local credentials and machine configuration
 .env
 .env.*
+*.key
+*.pem
+*.pfx
+*.p12
+*.local.json
+*.local.config
+*.local.ps1
+*.local.sh
+[Ss]ecrets/
+.ssh/
+.aws/
+.azure/
 # OS files
 .DS_Store
 Thumbs.db
