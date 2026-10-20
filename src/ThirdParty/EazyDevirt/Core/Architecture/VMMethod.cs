@@ -64,22 +64,36 @@ internal record VMMethodInfo
     {
         _layout=layout;
         Name="";VMLocals=new();VMParameters=new();int types=0;
+        int ReadTypePosition()
+        {
+            int value=reader.ReadInt32();
+            if(value<0 || value>=reader.BaseStream.Length)
+                throw new InvalidDataException("VM header type position is outside the resource.");
+            return value;
+        }
+        int ReadCount(int itemBytes)
+        {
+            int count=reader.ReadInt16();
+            if(count<0 || count>(reader.BaseStream.Length-reader.BaseStream.Position)/itemBytes)
+                throw new InvalidDataException("VM header array exceeds the resource.");
+            return count;
+        }
         foreach(var field in layout.Fields)
         {
             switch(field) {
                 case VMHeaderField.Type:
-                    if(types++==0)_firstType=reader.ReadInt32();else _secondType=reader.ReadInt32();break;
+                    if(types++==0)_firstType=ReadTypePosition();else _secondType=ReadTypePosition();break;
                 case VMHeaderField.Name:Name=reader.ReadString();break;
                 case VMHeaderField.Flags:BindingFlags=reader.ReadByte();break;
                 case VMHeaderField.Locals:
-                    int locals=reader.ReadInt16();if(locals<0)throw new InvalidDataException("Negative VM locals.");
-                    for(int i=0;i<locals;i++)VMLocals.Add(new VMLocal(reader.ReadInt32()));break;
+                    int locals=ReadCount(4);
+                    for(int i=0;i<locals;i++)VMLocals.Add(new VMLocal(ReadTypePosition()));break;
                 case VMHeaderField.Parameters:
-                    int parameters=reader.ReadInt16();if(parameters<0)throw new InvalidDataException("Negative VM parameters.");
+                    int parameters=ReadCount(5);
                     for(int i=0;i<parameters;i++) {
                         bool flag=false;int type;
-                        if(layout.ParameterBooleanFirst) {flag=reader.ReadBoolean();type=reader.ReadInt32();}
-                        else {type=reader.ReadInt32();flag=reader.ReadBoolean();}
+                        if(layout.ParameterBooleanFirst) {flag=reader.ReadBoolean();type=ReadTypePosition();}
+                        else {type=ReadTypePosition();flag=reader.ReadBoolean();}
                         VMParameters.Add(new VMParameter(type,flag));
                     }
                     break;

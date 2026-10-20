@@ -73,8 +73,17 @@ internal class MethodDevirtualizer : StageBase
     private void CalibrateHeader()
     {
         var candidates=new HashSet<int>(new[]{1,2,4,8,16,32,64,128});
-        foreach(var method in Ctx.VMMethods)
+        var samples=Ctx.VMMethods.Where(m=>m.MethodKey>=0).GroupBy(m=>m.MethodKey).Select(g=>g.First()).Take(64).ToArray();
+        var elapsed=System.Diagnostics.Stopwatch.StartNew();
+        int inspected=0;
+        Ctx.Progress?.Invoke("VM 头部校准",0,samples.Length);
+        foreach(var method in samples)
         {
+            if(elapsed.Elapsed.TotalSeconds>=5)
+            {
+                Ctx.Console.Warning("VM header calibration budget reached; unproven assumptions remain uncalibrated.");
+                break;
+            }
             try {
                 VMStream.Position=method.MethodKey;
                 var info=new VMMethodInfo(VMStreamReader,HeaderLayout);
@@ -94,6 +103,9 @@ internal class MethodDevirtualizer : StageBase
                 }
             }
             catch(Exception ex) { Ctx.Console.Warning("Header calibration skipped: "+ex.Message); }
+            inspected++;
+            Ctx.Progress?.Invoke("VM 头部校准",inspected,samples.Length);
+            if(inspected>=8 && candidates.Count==1 && HeaderLayout.TypeSlotsCalibrated)break;
         }
         if(candidates.Count==1) {HeaderLayout.StaticMask=candidates.Single();HeaderLayout.StaticMaskCalibrated=true;}
         Ctx.Console.Info($"VM header calibration: type slots={HeaderLayout.TypeSlotsCalibrated}, first return={HeaderLayout.FirstTypeIsReturn}, static mask={HeaderLayout.StaticMask} ({HeaderLayout.StaticMaskCalibrated})");

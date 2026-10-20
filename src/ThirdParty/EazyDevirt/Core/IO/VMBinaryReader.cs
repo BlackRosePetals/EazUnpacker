@@ -1,4 +1,4 @@
-﻿using System.Diagnostics.CodeAnalysis;
+using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using AsmResolver.DotNet;
 using AsmResolver.DotNet.Signatures;
@@ -263,15 +263,38 @@ internal class VMBinaryReader : VMBinaryReaderBase
 
     #region Overrides
 
+    private byte[] ReadPrimitiveBytes(int count)
+    {
+        var bytes=ReadBytes(count);
+        if(bytes.Length!=count)throw new EndOfStreamException("Truncated VM primitive.");
+        return bytes;
+    }
+
+    public override string ReadString()
+    {
+        uint length=0;
+        for(int shift=0;shift<35;shift+=7)
+        {
+            byte part=ReadByte();
+            if(shift==28 && part>7)throw new FormatException("Invalid VM string length.");
+            length|=(uint)(part & 127)<<shift;
+            if((part & 128)!=0)continue;
+            if(length>BaseStream.Length-BaseStream.Position)
+                throw new EndOfStreamException("VM string exceeds the resource.");
+            return Encoding.UTF8.GetString(ReadPrimitiveBytes((int)length));
+        }
+        throw new FormatException("Invalid VM string length.");
+    }
+
     public override sbyte ReadSByte()
     {
-        var bytes = ReadBytes(1);
+        var bytes = ReadPrimitiveBytes(1);
         return (sbyte)bytes[0];
     }
 
     public override int ReadInt32()
     {
-        var bytes = ReadBytes(4);
+        var bytes = ReadPrimitiveBytes(4);
 
         _thread.CallStack.Push(_readInt32MethodDef);
         return ReadEmulated<int>(bytes);
@@ -280,7 +303,7 @@ internal class VMBinaryReader : VMBinaryReaderBase
     // this always has the same endianness as ReadInt32
     public override int ReadInt32Special()
     {
-        var bytes = ReadBytes(4);
+        var bytes = ReadPrimitiveBytes(4);
 
         _thread.CallStack.Push(_readInt32MethodDef);
         return ReadEmulated<int>(bytes);
@@ -288,7 +311,7 @@ internal class VMBinaryReader : VMBinaryReaderBase
 
     public override uint ReadUInt32()
     {
-        var bytes = ReadBytes(4);
+        var bytes = ReadPrimitiveBytes(4);
 
         _thread.CallStack.Push(_readUInt32MethodDef);
         return ReadEmulated<uint>(bytes);
@@ -296,7 +319,7 @@ internal class VMBinaryReader : VMBinaryReaderBase
 
     public override long ReadInt64()
     {
-        var bytes = ReadBytes(8);
+        var bytes = ReadPrimitiveBytes(8);
 
         _thread.CallStack.Push(_readInt64MethodDef);
         return ReadEmulated<long>(bytes);
@@ -304,7 +327,7 @@ internal class VMBinaryReader : VMBinaryReaderBase
 
     public override ulong ReadUInt64()
     {
-        var bytes = ReadBytes(8);
+        var bytes = ReadPrimitiveBytes(8);
 
         _thread.CallStack.Push(_readUInt64MethodDef);
         return ReadEmulated<ulong>(bytes);
@@ -312,7 +335,7 @@ internal class VMBinaryReader : VMBinaryReaderBase
 
     public override short ReadInt16()
     {
-        var bytes = ReadBytes(2);
+        var bytes = ReadPrimitiveBytes(2);
      
         _thread.CallStack.Push(_readInt16MethodDef);
         return ReadEmulated<short>(bytes);
@@ -320,7 +343,7 @@ internal class VMBinaryReader : VMBinaryReaderBase
     
     public override ushort ReadUInt16()
     {
-        var bytes = ReadBytes(2);
+        var bytes = ReadPrimitiveBytes(2);
   
         _thread.CallStack.Push(_readUInt16MethodDef);
         return ReadEmulated<ushort>(bytes);
@@ -328,7 +351,7 @@ internal class VMBinaryReader : VMBinaryReaderBase
     
     public override float ReadSingle()
     {
-        var bytes = ReadBytes(4);
+        var bytes = ReadPrimitiveBytes(4);
 
         _thread.CallStack.Push(_readSingleMethodDef);
         return ReadEmulated<float>(bytes);
@@ -336,7 +359,7 @@ internal class VMBinaryReader : VMBinaryReaderBase
 
     public override double ReadDouble()
     {
-        var bytes = ReadBytes(8);
+        var bytes = ReadPrimitiveBytes(8);
 
         _thread.CallStack.Push(_readDoubleMethodDef);
         return ReadEmulated<double>(bytes);
@@ -345,7 +368,7 @@ internal class VMBinaryReader : VMBinaryReaderBase
     // untested, looks to be unused
     public override decimal ReadDecimal()
     {
-        var bytes = ReadBytes(16);
+        var bytes = ReadPrimitiveBytes(16);
 
         _thread.CallStack.Push(_readDecimalMethodDef);
         return ReadEmulated<decimal>(bytes);
