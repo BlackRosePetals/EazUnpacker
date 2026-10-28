@@ -13,6 +13,17 @@ internal sealed class VMHeaderLayout
     public bool TypeSlotsCalibrated { get; set; }
     public int StaticMask { get; set; } = 2;
     public bool StaticMaskCalibrated { get; set; }
+    public int[] StaticMaskCandidates { get; set; } = Array.Empty<int>();
+
+    public bool TryResolveStatic(int flags, out bool isStatic)
+    {
+        isStatic = (flags & StaticMask) != 0;
+        if (StaticMaskCalibrated) return true;
+        if (StaticMaskCandidates.Length == 0) return false;
+        bool value = (flags & StaticMaskCandidates[0]) != 0;
+        isStatic = value;
+        return StaticMaskCandidates.All(mask => ((flags & mask) != 0) == value);
+    }
 
     public static VMHeaderLayout Discover(TypeDefinition runtime)
     {

@@ -107,6 +107,7 @@ internal class MethodDevirtualizer : StageBase
             Ctx.Progress?.Invoke("VM 头部校准",inspected,samples.Length);
             if(inspected>=8 && candidates.Count==1 && HeaderLayout.TypeSlotsCalibrated)break;
         }
+        HeaderLayout.StaticMaskCandidates=candidates.ToArray();
         if(candidates.Count==1) {HeaderLayout.StaticMask=candidates.Single();HeaderLayout.StaticMaskCalibrated=true;}
         Ctx.Console.Info($"VM header calibration: type slots={HeaderLayout.TypeSlotsCalibrated}, first return={HeaderLayout.FirstTypeIsReturn}, static mask={HeaderLayout.StaticMask} ({HeaderLayout.StaticMaskCalibrated})");
     }
@@ -478,19 +479,47 @@ internal class MethodDevirtualizer : StageBase
     internal static int FindFinallyHandlerEnd(IList<CilInstruction> instructions, int start)
     {
         var visited = new HashSet<int>();
-        int index = start;
-        while (index >= 0 && index < instructions.Count && visited.Add(index))
+        var pending = new Stack<int>();
+        var offsets = instructions.Select((instruction, index) => (instruction.Offset, index))
+            .ToDictionary(item => item.Offset, item => item.index);
+        int terminalEnd = -1;
+        pending.Push(start);
+        while (pending.Count != 0)
         {
+            int index = pending.Pop();
+            if (index < start || index >= instructions.Count)
+                throw new InvalidDataException("Finally continuation is outside the handler.");
+            if (!visited.Add(index)) continue;
             var instruction = instructions[index];
             if (instruction.OpCode.Code is CilCode.Endfinally or CilCode.Throw or CilCode.Rethrow)
-                return index + 1;
-            if ((instruction.IsBranch() || instruction.OpCode.Code is CilCode.Leave or CilCode.Leave_S) && instruction.Operand is ICilLabel label)
             {
-                index = instructions.ToList().FindIndex(item => item.Offset == label.Offset);
+                terminalEnd = Math.Max(terminalEnd, index + 1);
                 continue;
             }
-            index++;
+            if (instruction.OpCode.Code is CilCode.Ret or CilCode.Endfilter)
+                throw new InvalidDataException("Unexpected finally continuation terminal.");
+            // Visit both edges of conditional branches. Following only the
+            // taken edge mistakes ordinary loops for an unbounded handler.
+            if (instruction.Operand is ICilLabel label &&
+                (instruction.IsBranch() || instruction.OpCode.Code is CilCode.Leave or CilCode.Leave_S))
+            {
+                if (!offsets.TryGetValue(label.Offset, out int target))
+                    throw new InvalidDataException("Invalid finally branch target.");
+                pending.Push(target);
+                if (instruction.OpCode.FlowControl != CilFlowControl.ConditionalBranch) continue;
+            }
+            else if (instruction.Operand is ICilLabel[] labels)
+            {
+                foreach (var targetLabel in labels)
+                {
+                    if (!offsets.TryGetValue(targetLabel.Offset, out int target))
+                        throw new InvalidDataException("Invalid finally switch target.");
+                    pending.Push(target);
+                }
+            }
+            pending.Push(index + 1);
         }
+        if (terminalEnd >= 0) return terminalEnd;
         throw new InvalidDataException("Finally handler has no bounded terminal continuation.");
     }
 

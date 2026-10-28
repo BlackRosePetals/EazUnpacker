@@ -538,7 +538,7 @@ internal class Resolver
 
     private IMethodDescriptor? ResolveEazCall(int position, GenericContext vmGenericContext, bool useConstrainedType)
     {
-        if(!Ctx.HeaderLayout.TypeSlotsCalibrated || !Ctx.HeaderLayout.StaticMaskCalibrated)
+        if(!Ctx.HeaderLayout.TypeSlotsCalibrated)
             throw new NotSupportedException("EazCall method header could not be calibrated.");
         if (Cache.TryGetValue(position, out var result))
             return (IMethodDescriptor?)result;
@@ -546,6 +546,10 @@ internal class Resolver
         Ctx.VMResolverStream.Seek(position, SeekOrigin.Begin);
 
         var methodInfo = new VMMethodInfo(VMStreamReader,Ctx.HeaderLayout);
+        // A corpus containing only static methods may leave several masks.
+        // Accept a call only when every surviving mask agrees on its flags.
+        if (!Ctx.HeaderLayout.TryResolveStatic(methodInfo.BindingFlags, out bool isStatic))
+            throw new NotSupportedException("EazCall static flags are ambiguous.");
         
         // i don't think anything special needs to be done for constrained
         // eaz just includes the types needed in the data anyway
@@ -566,7 +570,7 @@ internal class Resolver
         
         var vmParameters = methodInfo.VMParameters.Select(x => ResolveType(x.VMType)?.ToTypeSignature()!).ToArray();
 
-        var vmMethodSig = (methodInfo.IsStatic
+        var vmMethodSig = (isStatic
                 ? MethodSignature.CreateStatic(returnType.ToTypeSignature(),
                     vmGenericContext.Method?.TypeArguments.Count ?? 0, vmParameters)
                 : MethodSignature.CreateInstance(returnType.ToTypeSignature(),
